@@ -18,10 +18,6 @@ let isPlaying = false;
 let timestampInicioEpoch = 0; 
 let milissegundosAcumuladosAntesDoPause = 0; 
 
-// URLS PADRÃO DO MODO STANDBY (Altere para os links dos seus arquivos MP4 e MP3)
-const URL_STANDBY_VIDEO = "https://seu-servidor.com/standby_video.mp4";
-const URL_STANDBY_AUDIO = "https://seu-servidor.com/standby_audio.mp3";
-
 // MAPA DE DISPOSITIVOS REAIS
 const dispositivosUnicosMap = new Map();
 
@@ -42,11 +38,10 @@ setInterval(() => {
     }
 }, 1000);
 
-// RADAR ANTI-FANTASMA (Limpa quem ficou travado a cada 4 segundos)
+// RADAR ANTI-FANTASMA
 setInterval(() => {
     wss.clients.forEach((ws) => {
         if (ws.isAlive === false) {
-            console.log('Derrubando conexao fantasma!');
             return ws.terminate();
         }
         ws.isAlive = false;
@@ -64,7 +59,6 @@ wss.on('connection', (ws) => {
         try {
             const data = JSON.parse(message);
 
-            // 1. APARELHO ENTROU
             if (data.tipo === 'REGISTRAR_DISPOSITIVO' && data.deviceId) {
                 meuIdRegistrado = data.deviceId;
                 if (dispositivosUnicosMap.has(meuIdRegistrado)) {
@@ -74,17 +68,14 @@ wss.on('connection', (ws) => {
                     }
                 }
                 dispositivosUnicosMap.set(meuIdRegistrado, ws);
-                console.log(`ENTROU: ${meuIdRegistrado} | Total na tela: ${dispositivosUnicosMap.size}`);
                 enviarEstadoInicial(ws);
                 broadcastContador();
                 return;
             }
 
-            // 2. APARELHO AVISOU QUE SAIU
             if (data.tipo === 'DESCONECTAR') {
                 if (meuIdRegistrado && dispositivosUnicosMap.get(meuIdRegistrado) === ws) {
                     dispositivosUnicosMap.delete(meuIdRegistrado);
-                    console.log(`SAIU RAPIDO: ${meuIdRegistrado} | Total na tela: ${dispositivosUnicosMap.size}`);
                     broadcastContador();
                 }
                 ws.close();
@@ -95,14 +86,12 @@ wss.on('connection', (ws) => {
             const url = data.url;
             const slink = data.slink || data.comando;
 
-            // ADICIONAR MÍDIA NA FILA
             if (tipo === 'midia' || tipo === 'adicionar_midia' || url) {
                 if (url) {
                     const estavaVazio = filaMidias.length === 0;
                     filaMidias.push({ id: Date.now().toString(), url: url, titulo: data.titulo || `Mídia ${filaMidias.length + 1}` });
                     
                     if (estavaVazio) {
-                        // Se estava em standby, o novo vídeo assume o índice 0 e começa a tocar
                         indiceReproduzindo = 0; 
                         milissegundosAcumuladosAntesDoPause = 0; 
                         timestampInicioEpoch = Date.now(); 
@@ -111,26 +100,21 @@ wss.on('connection', (ws) => {
                     broadcastEstadoTotal();
                 }
             } 
-            // VÍdeo ATUAL TERMINOU -> CONSUME/APAGA DA FILA
             else if (tipo === 'proximo_video') {
                 if (filaMidias.length > 0) {
-                    // Remove permanentemente o primeiro elemento (vídeo consumido)
-                    filaMidias.shift();
+                    filaMidias.shift(); // Consome/apaga o vídeo antigo
                     milissegundosAcumuladosAntesDoPause = 0; 
                     timestampInicioEpoch = Date.now(); 
 
                     if (filaMidias.length > 0) {
-                        // Ainda tem vídeos, continua reproduzindo o novo primeiro
                         indiceReproduzindo = 0;
                         isPlaying = true;
                     } else {
-                        // Fila zerou! Entra em modo Standby
-                        isPlaying = false;
+                        isPlaying = false; // Entra em Standby local
                     }
                     broadcastEstadoTotal();
                 }
             } 
-            // COMANDOS EXTRAS (Clear, Next, Prev, Pause, Play)
             else if (slink || tipo === 'comando') {
                 const cmd = slink || tipo;
                 if (cmd === 'clear' || cmd === 'limpar') { 
@@ -141,15 +125,10 @@ wss.on('connection', (ws) => {
                 }
                 else if (cmd === 'next') { 
                     if (filaMidias.length > 0) {
-                        // Pular também consome/apaga o atual
                         filaMidias.shift();
                         milissegundosAcumuladosAntesDoPause = 0; 
                         timestampInicioEpoch = Date.now();
-                        if (filaMidias.length > 0) {
-                            isPlaying = true;
-                        } else {
-                            isPlaying = false;
-                        }
+                        isPlaying = filaMidias.length > 0;
                     } 
                 }
                 else if (cmd === 'pause') { 
@@ -172,7 +151,6 @@ wss.on('connection', (ws) => {
     ws.on('close', () => {
         if (meuIdRegistrado && dispositivosUnicosMap.get(meuIdRegistrado) === ws) {
             dispositivosUnicosMap.delete(meuIdRegistrado);
-            console.log(`SAIU (Desconexao Nativa): ${meuIdRegistrado} | Total na tela: ${dispositivosUnicosMap.size}`);
             broadcastContador();
         }
     });
@@ -187,8 +165,6 @@ function enviarEstadoInicial(ws) {
             indice: indiceReproduzindo,
             modoStandby: emStandby,
             midiaAtual: emStandby ? null : filaMidias[0],
-            standbyVideo: URL_STANDBY_VIDEO,
-            standbyAudio: URL_STANDBY_AUDIO,
             posicaoMs: calcularTempoAtualMs(), 
             timestampServidor: Date.now(),
             reproduzindo: isPlaying, 
@@ -205,8 +181,6 @@ function broadcastContador() {
 function broadcastParaTodos(obj) {
     obj.totalDispositivos = dispositivosUnicosMap.size;
     obj.modoStandby = filaMidias.length === 0;
-    obj.standbyVideo = URL_STANDBY_VIDEO;
-    obj.standbyAudio = URL_STANDBY_AUDIO;
     const str = JSON.stringify(obj);
     dispositivosUnicosMap.forEach((client) => { if (client.readyState === WebSocket.OPEN) client.send(str); });
 }
