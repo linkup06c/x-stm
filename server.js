@@ -1,7 +1,35 @@
 const WebSocket = require('ws');
 const http = require('http');
+const { RtcTokenBuilder, RtcRole } = require('agora-access-token');
+
+// INSIRA SUAS CREDENCIAIS DO AGORA AQUI (Pegue grátis no console.agora.io)
+const AGORA_APP_ID = "SEU_APP_ID_AQUI";
+const AGORA_APP_CERTIFICATE = "SEU_APP_CERTIFICATE_AQUI";
 
 const server = http.createServer((req, res) => {
+    // Rota para o Android pedir o token de voz da Call
+    if (req.url.startsWith('/token-voz')) {
+        const channelName = "sala_principal_xstream";
+        const uid = 0; // UID automático
+        const role = RtcRole.PUBLISHER;
+        const expirationTimeInSeconds = 3600 * 24; // Token válido por 24 horas
+        const currentTimestamp = Math.floor(Date.now() / 1000);
+        const privilegeExpiredTs = currentTimestamp + expirationTimeInSeconds;
+
+        const token = RtcTokenBuilder.buildTokenWithUid(
+            AGORA_APP_ID,
+            AGORA_APP_CERTIFICATE,
+            channelName,
+            uid,
+            role,
+            privilegeExpiredTs
+        );
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ appId: AGORA_APP_ID, channel: channelName, token: token, uid: uid }));
+        return;
+    }
+
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ status: "online", totalDispositivos: dispositivosUnicosMap.size }));
 });
@@ -14,7 +42,6 @@ let isPlaying = false;
 let timestampInicioEpoch = 0; 
 let milissegundosAcumuladosAntesDoPause = 0; 
 
-// MAPA DE DISPOSITIVOS REAIS
 const dispositivosUnicosMap = new Map();
 
 function calcularTempoAtualMs() {
@@ -22,7 +49,6 @@ function calcularTempoAtualMs() {
     return milissegundosAcumuladosAntesDoPause + (Date.now() - timestampInicioEpoch);
 }
 
-// SINCRONIZAÇÃO DA MÍDIA
 setInterval(() => {
     if (isPlaying && filaMidias.length > 0) {
         broadcastParaTodos({
@@ -32,13 +58,9 @@ setInterval(() => {
     }
 }, 1000);
 
-// RADAR ANTI-FANTASMA (Limpa quem ficou travado a cada 4 segundos)
 setInterval(() => {
     wss.clients.forEach((ws) => {
-        if (ws.isAlive === false) {
-            console.log('Derrubando conexao fantasma!');
-            return ws.terminate(); // Força a queda
-        }
+        if (ws.isAlive === false) return ws.terminate();
         ws.isAlive = false;
         ws.ping();
     });
@@ -47,34 +69,27 @@ setInterval(() => {
 wss.on('connection', (ws) => {
     let meuIdRegistrado = null;
     ws.isAlive = true;
-
     ws.on('pong', () => { ws.isAlive = true; });
 
     ws.on('message', (message) => {
         try {
             const data = JSON.parse(message);
 
-            // 1. APARELHO ENTROU
             if (data.tipo === 'REGISTRAR_DISPOSITIVO' && data.deviceId) {
                 meuIdRegistrado = data.deviceId;
                 if (dispositivosUnicosMap.has(meuIdRegistrado)) {
                     const socketAntigo = dispositivosUnicosMap.get(meuIdRegistrado);
-                    if (socketAntigo !== ws && socketAntigo.readyState === WebSocket.OPEN) {
-                        socketAntigo.close();
-                    }
+                    if (socketAntigo !== ws && socketAntigo.readyState === WebSocket.OPEN) socketAntigo.close();
                 }
                 dispositivosUnicosMap.set(meuIdRegistrado, ws);
-                console.log(`ENTROU: ${meuIdRegistrado} | Total na tela: ${dispositivosUnicosMap.size}`);
                 enviarEstadoInicial(ws);
                 broadcastContador();
                 return;
             }
 
-            // 2. APARELHO AVISOU QUE SAIU (Botão Home, Minimizar, etc)
             if (data.tipo === 'DESCONECTAR') {
                 if (meuIdRegistrado && dispositivosUnicosMap.get(meuIdRegistrado) === ws) {
                     dispositivosUnicosMap.delete(meuIdRegistrado);
-                    console.log(`SAIU RAPIDO: ${meuIdRegistrado} | Total na tela: ${dispositivosUnicosMap.size}`);
                     broadcastContador();
                 }
                 ws.close();
@@ -109,11 +124,9 @@ wss.on('connection', (ws) => {
         } catch (e) { }
     });
 
-    // 3. SE O APARELHO FECHAR POR ERRO OU QUEDA DE ENERGIA
     ws.on('close', () => {
         if (meuIdRegistrado && dispositivosUnicosMap.get(meuIdRegistrado) === ws) {
             dispositivosUnicosMap.delete(meuIdRegistrado);
-            console.log(`SAIU (Desconexao Nativa): ${meuIdRegistrado} | Total na tela: ${dispositivosUnicosMap.size}`);
             broadcastContador();
         }
     });
