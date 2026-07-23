@@ -3,8 +3,8 @@ const http = require('http');
 const { RtcTokenBuilder, RtcRole } = require('agora-access-token');
 
 // INSIRA SUAS CREDENCIAIS DO AGORA AQUI (Pegue grátis no console.agora.io)
-const AGORA_APP_ID = "SEU_APP_ID_AQUI";
-const AGORA_APP_CERTIFICATE = "SEU_APP_CERTIFICATE_AQUI";
+const AGORA_APP_ID = "9935747469c74640bce6fd4be3bf0197";
+const AGORA_APP_CERTIFICATE = "5eecc6cdadc64f8eb3cfa79fc54d9099";
 
 const server = http.createServer((req, res) => {
     // Rota para o Android pedir o token de voz da Call
