@@ -1,53 +1,84 @@
+const express = require("express");
+const http = require("http");
+const { Server } = require("socket.io");
 const WebSocket = require('ws');
-const http = require('http');
-const { RtcTokenBuilder, RtcRole } = require('agora-access-token');
 
-// Suas credenciais reais do Agora
-const AGORA_APP_ID = "9935747469c74640bce6fd4be3bf0197";
-const AGORA_APP_CERTIFICATE = "5eecc6cdadc64f8eb3cfa79fc54d9099";
+const app = express();
+const server = http.createServer(app);
 
-const server = http.createServer((req, res) => {
-    try {
-        // Rota para o Android pedir o token de voz da Call
-        if (req.url.startsWith('/token-voz')) {
-            const channelName = "sala_principal_xstream";
-            // Usar UID numérico padrão aleatório ou 0 com suporte a UID dinâmico do cliente
-            const uid = 0; 
-            const role = RtcRole.PUBLISHER;
-            const expirationTimeInSeconds = 3600 * 24; // 24 horas
-            const currentTimestamp = Math.floor(Date.now() / 1000);
-            const privilegeExpiredTs = currentTimestamp + expirationTimeInSeconds;
-
-            // Gerando o token com permissão ampla de Publisher para o canal
-            const token = RtcTokenBuilder.buildTokenWithUid(
-                AGORA_APP_ID,
-                AGORA_APP_CERTIFICATE,
-                channelName,
-                uid,
-                role,
-                privilegeExpiredTs
-            );
-
-            res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ 
-                appId: AGORA_APP_ID, 
-                channel: channelName, 
-                token: token, 
-                uid: uid 
-            }));
-            return;
-        }
-
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ status: "online", totalDispositivos: dispositivosUnicosMap.size }));
-    } catch (err) {
-        console.error("Erro na requisição HTTP:", err.message);
-        res.writeHead(500, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: "Erro interno no servidor" }));
-    }
+// Configuração do Socket.io para a Chamada de Voz (WebRTC)
+const io = new Server(server, {
+  cors: { origin: "*" }
 });
 
-const wss = new WebSocket.Server({ server });
+// Canal fixo padrão para evitar que o pessoal misture as chamadas
+const SALA_UNICA_VOZ = "sala_principal_carro";
+const activeUsers = new Map(); // user.id -> socket.id
+
+io.on("connection", (socket) => {
+  console.log("Novo cliente conectado na voz (Socket.io):", socket.id);
+
+  // Usuário entra direto na sala padrão sem opção de misturar canal
+  socket.on("join-room", ({ user }) => {
+    const room = SALA_UNICA_VOZ;
+
+    // Remove duplicado se o mesmo usuário reconectar
+    if (user && user.id && activeUsers.has(user.id)) {
+      const oldSocketId = activeUsers.get(user.id);
+      const oldSocket = io.sockets.sockets.get(oldSocketId);
+      if (oldSocket) oldSocket.disconnect(true);
+    }
+
+    if (user && user.id) {
+      activeUsers.set(user.id, socket.id);
+    }
+
+    socket.join(room);
+    socket.user = user;
+    socket.room = room;
+
+    // Envia a lista atual de quem está na sala para o novo entrante
+    const clients = Array.from(io.sockets.sockets.values())
+      .filter(s => s.room === room && s.user)
+      .map(s => ({
+        id: s.id,
+        user: s.user
+      }));
+
+    socket.emit("room-users", clients);
+
+    // Avisa os outros que alguém entrou
+    socket.to(room).emit("user-joined", {
+      id: socket.id,
+      user
+    });
+  });
+
+  // Sinalização WebRTC (Troca de dados de áudio P2P entre os carros/celulares)
+  socket.on("signal", (data) => {
+    if (data && data.to) {
+      io.to(data.to).emit("signal", {
+        from: socket.id,
+        signal: data.signal
+      });
+    }
+  });
+
+  socket.on("disconnect", () => {
+    console.log("Cliente saiu da voz:", socket.id);
+    if (socket.user && socket.user.id) {
+      activeUsers.delete(socket.user.id);
+    }
+    if (socket.room) {
+      socket.to(socket.room).emit("user-left", socket.id);
+    }
+  });
+});
+
+// ==========================================================
+// SEÇÃO DO WEBSOCKET TRADICIONAL (Para Fila de Mídia e Comandos)
+// ==========================================================
+const wss = new WebSocket.Server({ noServer: true });
 
 let filaMidias = []; 
 let indiceReproduzindo = 0; 
@@ -62,22 +93,17 @@ function calcularTempoAtualMs() {
     return milissegundosAcumuladosAntesDoPause + (Date.now() - timestampInicioEpoch);
 }
 
+// Sincronização periódica da mídia
 setInterval(() => {
     if (isPlaying && filaMidias.length > 0) {
         broadcastParaTodos({
-            comando: "SYNC_TEMPO", posicaoMs: calcularTempoAtualMs(),
-            timestampServidor: Date.now(), reproduzindo: isPlaying
+            comando: "SYNC_TEMPO", 
+            posicaoMs: calcularTempoAtualMs(),
+            timestampServidor: Date.now(), 
+            reproduzindo: isPlaying
         });
     }
 }, 1000);
-
-setInterval(() => {
-    wss.clients.forEach((ws) => {
-        if (ws.isAlive === false) return ws.terminate();
-        ws.isAlive = false;
-        ws.ping();
-    });
-}, 4000);
 
 wss.on('connection', (ws) => {
     let meuIdRegistrado = null;
@@ -135,7 +161,7 @@ wss.on('connection', (ws) => {
                 broadcastEstadoTotal();
             }
         } catch (e) {
-            console.error("Erro ao processar mensagem recebida:", e.message);
+            console.error("Erro ao processar mensagem do WebSocket:", e.message);
         }
     });
 
@@ -145,6 +171,18 @@ wss.on('connection', (ws) => {
             broadcastContador();
         }
     });
+});
+
+// Faz o roteamento para aceitar HTTP normal, Socket.io (voz) e WebSocket (mídia) na mesma porta
+server.on('upgrade', (request, socket, head) => {
+    // Se a rota for do websocket de mídia
+    wss.handleUpgrade(request, socket, head, (ws) => {
+        wss.emit('connection', ws, request);
+    });
+});
+
+app.get('/', (req, res) => {
+    res.json({ status: "online", totalDispositivos: dispositivosUnicosMap.size });
 });
 
 function enviarEstadoInicial(ws) {
@@ -172,4 +210,4 @@ function broadcastParaTodos(obj) {
 function broadcastEstadoTotal() { dispositivosUnicosMap.forEach((client) => enviarEstadoInicial(client)); }
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`Servidor rodando na porta ${PORT}`));
+server.listen(PORT, () => console.log(`Servidor unificado rodando na porta ${PORT}`));
