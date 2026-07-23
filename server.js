@@ -2,36 +2,42 @@ const WebSocket = require('ws');
 const http = require('http');
 const { RtcTokenBuilder, RtcRole } = require('agora-access-token');
 
-// INSIRA SUAS CREDENCIAIS DO AGORA AQUI (Pegue grátis no console.agora.io)
+// Suas credenciais reais do Agora
 const AGORA_APP_ID = "9935747469c74640bce6fd4be3bf0197";
 const AGORA_APP_CERTIFICATE = "5eecc6cdadc64f8eb3cfa79fc54d9099";
 
 const server = http.createServer((req, res) => {
-    // Rota para o Android pedir o token de voz da Call
-    if (req.url.startsWith('/token-voz')) {
-        const channelName = "sala_principal_xstream";
-        const uid = 0; // UID automático
-        const role = RtcRole.PUBLISHER;
-        const expirationTimeInSeconds = 3600 * 24; // Token válido por 24 horas
-        const currentTimestamp = Math.floor(Date.now() / 1000);
-        const privilegeExpiredTs = currentTimestamp + expirationTimeInSeconds;
+    try {
+        // Rota para o Android pedir o token de voz da Call
+        if (req.url.startsWith('/token-voz')) {
+            const channelName = "sala_principal_xstream";
+            const uid = 0; 
+            const role = RtcRole.PUBLISHER;
+            const expirationTimeInSeconds = 3600 * 24; 
+            const currentTimestamp = Math.floor(Date.now() / 1000);
+            const privilegeExpiredTs = currentTimestamp + expirationTimeInSeconds;
 
-        const token = RtcTokenBuilder.buildTokenWithUid(
-            AGORA_APP_ID,
-            AGORA_APP_CERTIFICATE,
-            channelName,
-            uid,
-            role,
-            privilegeExpiredTs
-        );
+            const token = RtcTokenBuilder.buildTokenWithUid(
+                AGORA_APP_ID,
+                AGORA_APP_CERTIFICATE,
+                channelName,
+                uid,
+                role,
+                privilegeExpiredTs
+            );
+
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ appId: AGORA_APP_ID, channel: channelName, token: token, uid: uid }));
+            return;
+        }
 
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ appId: AGORA_APP_ID, channel: channelName, token: token, uid: uid }));
-        return;
+        res.end(JSON.stringify({ status: "online", totalDispositivos: dispositivosUnicosMap.size }));
+    } catch (err) {
+        console.error("Erro na requisição HTTP:", err.message);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: "Erro interno no servidor" }));
     }
-
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ status: "online", totalDispositivos: dispositivosUnicosMap.size }));
 });
 
 const wss = new WebSocket.Server({ server });
@@ -121,7 +127,9 @@ wss.on('connection', (ws) => {
                 else if (cmd === 'play') { if (!isPlaying) { timestampInicioEpoch = Date.now(); isPlaying = true; } }
                 broadcastEstadoTotal();
             }
-        } catch (e) { }
+        } catch (e) {
+            console.error("Erro ao processar mensagem recebida:", e.message);
+        }
     });
 
     ws.on('close', () => {
