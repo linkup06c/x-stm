@@ -9,7 +9,8 @@ const server = http.createServer((req, res) => {
         fila: filaMidias,
         indice: indiceReproduzindo,
         tempoMs: calcularTempoAtualMs(),
-        play: isPlaying
+        play: isPlaying,
+        totalDispositivos: wss ? wss.clients.size : 0
     }));
 });
 
@@ -32,21 +33,24 @@ function calcularTempoAtualMs() {
     return milissegundosAcumuladosAntesDoPause + decorrido;
 }
 
-// RELÓGIO MESTRE DE ALTA PRECISÃO (Pulso a cada 1 segundo enviando milissegundos absolutos)
+// RELÓGIO MESTRE DE ALTA PRECISÃO (Pulso a cada 1 segundo enviando milissegundos absolutos e total de telas)
 setInterval(() => {
     if (isPlaying && filaMidias.length > 0) {
         broadcastParaTodos({
             comando: "SYNC_TEMPO",
             posicaoMs: calcularTempoAtualMs(),
             timestampServidor: Date.now(),
-            reproduzindo: isPlaying
+            reproduzindo: isPlaying,
+            totalDispositivos: wss.clients.size
         });
     }
 }, 1000);
 
 wss.on('connection', (ws) => {
-    console.log('Novo dispositivo conectado ao núcleo.');
+    console.log('Novo dispositivo conectado ao núcleo. Total:', wss.clients.size);
     enviarEstadoInicial(ws);
+    // Notifica todos os outros que entrou um novo dispositivo para atualizar o contador em tempo real
+    broadcastEstadoTotal();
 
     ws.on('message', (message) => {
         try {
@@ -134,7 +138,9 @@ wss.on('connection', (ws) => {
     });
 
     ws.on('close', () => {
-        console.log('Dispositivo desconectado.');
+        console.log('Dispositivo desconectado. Total remanescente:', wss.clients.size);
+        // Atualiza o contador de todo mundo quando alguém sai
+        broadcastEstadoTotal();
     });
 });
 
@@ -147,7 +153,8 @@ function enviarEstadoInicial(ws) {
             midiaAtual: filaMidias.length > 0 ? filaMidias[indiceReproduzindo] : null,
             posicaoMs: calcularTempoAtualMs(),
             timestampServidor: Date.now(),
-            reproduzindo: isPlaying
+            reproduzindo: isPlaying,
+            totalDispositivos: wss.clients.size
         };
         ws.send(JSON.stringify(payload));
     }
