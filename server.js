@@ -5,14 +5,11 @@ const server = http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
         status: "online",
-        versaoServidor: "2.0",
-        configuracoesRemotas: {
-            tempoSincroniaMs: 2000,
-            permitirLoop: true,
-            mensagemTela: "Transmissão ao vivo ativa"
-        },
-        filaAtual: filaMidias,
-        indiceAtual: indiceReproduzindo
+        servidor: "X-Stream Universal Server-Driven",
+        fila: filaMidias,
+        indice: indiceReproduzindo,
+        tempo: tempoAtualSegundos,
+        play: isPlaying
     }));
 });
 
@@ -20,105 +17,125 @@ const wss = new WebSocket.Server({ server });
 
 let filaMidias = []; 
 let indiceReproduzindo = 0; 
-let tempoAtualTransmissao = 0; 
-let isTransmitindo = false;
+let tempoAtualSegundos = 0; 
+let isPlaying = false;
 
-// Relógio mestre da live
+// RELÓGIO MESTRE DA TRANSMISSÃO (O coração batendo a cada 1 segundo)
 setInterval(() => {
-    if (isTransmitindo && filaMidias.length > 0) {
-        tempoAtualTransmissao++;
-        if (tempoAtualTransmissao % 2 === 0) {
-            broadcastUniversal({
-                tipo: 'ACAO_SERVIDOR',
-                comando: 'SINCRONIZAR_TEMPO',
-                posicaoSegundos: tempoAtualTransmissao,
-                reproduzindo: isTransmitindo
+    if (isPlaying && filaMidias.length > 0) {
+        tempoAtualSegundos++;
+        // Envia o pulso de tempo a cada 2 segundos para sincronizar todos os players
+        if (tempoAtualSegundos % 2 === 0) {
+            broadcastParaTodos({
+                comando: "SYNC_TEMPO",
+                posicao: tempoAtualSegundos,
+                reproduzindo: isPlaying
             });
         }
     }
 }, 1000);
 
 wss.on('connection', (ws) => {
-    console.log('Cliente conectado ao núcleo universal.');
-    enviarEstadoUniversal(ws);
+    console.log('Novo dispositivo conectado ao núcleo.');
+    enviarEstadoInicial(ws);
 
     ws.on('message', (message) => {
         try {
             const data = JSON.parse(message);
-            console.log('Comando recebido do app:', data);
+            console.log('Comando recebido:', data);
 
-            // O servidor decide o que fazer com base na intenção, abstraindo o app
-            const acao = data.acao || data.tipo;
+            const tipo = data.tipo || data.acao;
+            const url = data.url;
+            const slink = data.slink || data.comando;
 
-            if (acao === 'ADICIONAR_MIDIA' || acao === 'midia') {
-                const novaMidia = {
-                    id: Date.now().toString(),
-                    url: data.url,
-                    titulo: data.titulo || `Mídia ${filaMidias.length + 1}`
-                };
-                filaMidias.push(novaMidia);
-                if (filaMidias.length === 1) {
-                    indiceReproduzindo = 0;
-                    tempoAtualTransmissao = 0;
-                    isTransmitindo = true;
+            // 1. ADICIONAR MÍDIA À FILA
+            if (tipo === 'midia' || tipo === 'adicionar_midia' || url) {
+                if (url) {
+                    const novaMidia = {
+                        id: Date.now().toString(),
+                        url: url,
+                        titulo: data.titulo || `Mídia ${filaMidias.length + 1}`
+                    };
+                    filaMidias.push(novaMidia);
+
+                    // Se for a única na fila, inicia o player imediatamente do zero
+                    if (filaMidias.length === 1) {
+                        indiceReproduzindo = 0;
+                        tempoAtualSegundos = 0;
+                        isPlaying = true;
+                    }
+                    broadcastEstadoTotal();
                 }
-                broadcastEstadoUniversal();
             }
-            else if (acao === 'PROXIMO_VIDEO' || acao === 'proximo_video') {
+
+            // 2. O PLAYER AVISOU QUE O VÍDEO ACABOU (Loop / Próximo)
+            else if (tipo === 'proximo_video') {
                 if (filaMidias.length > 0) {
                     indiceReproduzindo++;
                     if (indiceReproduzindo >= filaMidias.length) {
-                        indiceReproduzindo = 0;
+                        indiceReproduzindo = 0; // Volta para o primeiro (Loop infinito)
                     }
-                    tempoAtualTransmissao = 0;
-                    isTransmitindo = true;
+                    tempoAtualSegundos = 0;
+                    isPlaying = true;
+                    broadcastEstadoTotal();
                 }
-                broadcastEstadoUniversal();
             }
-            else if (acao === 'CONTROLE_GERAL' || data.slink) {
-                const cmd = data.slink || data.comando;
+
+            // 3. COMANDOS DE CONTROLE REMOTO (Play, Pause, Próximo, Limpar)
+            else if (slink || tipo === 'comando') {
+                const cmd = slink || tipo;
+
                 if (cmd === 'clear' || cmd === 'limpar') {
                     filaMidias = [];
                     indiceReproduzindo = 0;
-                    tempoAtualTransmissao = 0;
-                    isTransmitindo = false;
+                    tempoAtualSegundos = 0;
+                    isPlaying = false;
+                } else if (cmd === 'next') {
+                    if (filaMidias.length > 0) {
+                        indiceReproduzindo = (indiceReproduzindo + 1) % filaMidias.length;
+                        tempoAtualSegundos = 0;
+                        isPlaying = true;
+                    }
+                } else if (cmd === 'prev') {
+                    if (filaMidias.length > 0) {
+                        indiceReproduzindo = (indiceReproduzindo - 1 + filaMidias.length) % filaMidias.length;
+                        tempoAtualSegundos = 0;
+                        isPlaying = true;
+                    }
                 } else if (cmd === 'pause') {
-                    isTransmitindo = false;
+                    isPlaying = false;
                 } else if (cmd === 'play') {
-                    isTransmitindo = true;
+                    isPlaying = true;
                 }
-                broadcastEstadoUniversal();
+                broadcastEstadoTotal();
             }
 
         } catch (e) {
-            console.error('Erro ao interpretar payload:', e);
+            console.error('Erro ao processar mensagem JSON:', e);
         }
     });
 
     ws.on('close', () => {
-        console.log('Cliente desconectado.');
+        console.log('Dispositivo desconectado.');
     });
 });
 
-function enviarEstadoUniversal(ws) {
+function enviarEstadoInicial(ws) {
     if (ws.readyState === WebSocket.OPEN) {
         const payload = {
-            tipo: 'ACAO_SERVIDOR',
-            comando: 'ATUALIZAR_ESTADO_TOTAL',
-            dados: {
-                fila: filaMidias,
-                indiceAtual: indiceReproduzindo,
-                midiaAtual: filaMidias.length > 0 ? filaMidias[indiceReproduzindo] : null,
-                posicaoSegundos: tempoAtualTransmissao,
-                reproduzindo: isTransmitindo
-            }
+            comando: "ESTADO_TOTAL",
+            fila: filaMidias,
+            indice: indiceReproduzindo,
+            midiaAtual: filaMidias.length > 0 ? filaMidias[indiceReproduzindo] : null,
+            posicao: tempoAtualSegundos,
+            reproduzindo: isPlaying
         };
         ws.send(JSON.stringify(payload));
     }
 }
 
-function broadcastUniversal(payloadObj) {
-    const str = JSON.stringify(payloadObj);
+function broadcastParaTodos(obj) {
+    const str = JSON.stringify(obj);
     wss.clients.forEach((client) => {
         if (client.readyState === WebSocket.OPEN) {
             client.send(str);
@@ -126,13 +143,13 @@ function broadcastUniversal(payloadObj) {
     });
 }
 
-function broadcastEstadoUniversal() {
+function broadcastEstadoTotal() {
     wss.clients.forEach((client) => {
-        enviarEstadoUniversal(client);
+        enviarEstadoInicial(client);
     });
 }
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-    console.log(`Servidor Universal Server-Driven rodando na porta ${PORT}`);
+    console.log(`Servidor definitivo rodando na porta ${PORT}`);
 });
