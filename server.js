@@ -1,5 +1,5 @@
 const WebSocket = require('ws');
-const http = http = require('http'); // Mantido igual
+const http = require('http');
 
 const server = http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -50,16 +50,12 @@ setInterval(() => {
 }, 1000);
 
 wss.on('connection', (ws, req) => {
-    // Cria um ID único para este cliente baseado no IP remoto e timestamp
     const clientId = req.socket.remoteAddress + "_" + Date.now();
     clientesConectados.set(ws, clientId);
 
     console.log('Novo dispositivo conectado. Total real:', clientesConectados.size);
     
-    // Envia o estado completo APENAS para quem acabou de chegar
     enviarEstadoInicial(ws);
-    
-    // Atualiza o contador exato para todos
     broadcastContador();
 
     ws.on('message', (message) => {
@@ -148,11 +144,8 @@ wss.on('connection', (ws, req) => {
     });
 
     ws.on('close', () => {
-        // Remove estritamente este socket do mapa de ativos
         clientesConectados.delete(ws);
         console.log('Dispositivo desconectado. Total remanescente real:', clientesConectados.size);
-        
-        // Atualiza o contador real para todos
         broadcastContador();
     });
 
