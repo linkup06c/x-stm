@@ -11,12 +11,14 @@ const server = http.createServer((req, res) => {
         // Rota para o Android pedir o token de voz da Call
         if (req.url.startsWith('/token-voz')) {
             const channelName = "sala_principal_xstream";
+            // Usar UID numérico padrão aleatório ou 0 com suporte a UID dinâmico do cliente
             const uid = 0; 
             const role = RtcRole.PUBLISHER;
-            const expirationTimeInSeconds = 3600 * 24; 
+            const expirationTimeInSeconds = 3600 * 24; // 24 horas
             const currentTimestamp = Math.floor(Date.now() / 1000);
             const privilegeExpiredTs = currentTimestamp + expirationTimeInSeconds;
 
+            // Gerando o token com permissão ampla de Publisher para o canal
             const token = RtcTokenBuilder.buildTokenWithUid(
                 AGORA_APP_ID,
                 AGORA_APP_CERTIFICATE,
@@ -27,7 +29,12 @@ const server = http.createServer((req, res) => {
             );
 
             res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ appId: AGORA_APP_ID, channel: channelName, token: token, uid: uid }));
+            res.end(JSON.stringify({ 
+                appId: AGORA_APP_ID, 
+                channel: channelName, 
+                token: token, 
+                uid: uid 
+            }));
             return;
         }
 
