@@ -20,7 +20,7 @@ let filaMidias = [];
 let indiceReproduzindo = 0; 
 let isPlaying = false;
 
-// Controle de tempo de alta precisão em milissegundos (Sem arredondar para segundos inteiros)
+// Controle de tempo de alta precisão em milissegundos
 let timestampInicioEpoch = 0; 
 let milissegundosAcumuladosAntesDoPause = 0; 
 
@@ -33,7 +33,7 @@ function calcularTempoAtualMs() {
     return milissegundosAcumuladosAntesDoPause + decorrido;
 }
 
-// RELÓGIO MESTRE DE ALTA PRECISÃO (Pulso a cada 1 segundo enviando milissegundos absolutos e total de telas)
+// RELÓGIO MESTRE DE ALTA PRECISÃO (Envia o sync de tempo e o total de dispositivos juntos de forma otimizada)
 setInterval(() => {
     if (isPlaying && filaMidias.length > 0) {
         broadcastParaTodos({
@@ -48,9 +48,12 @@ setInterval(() => {
 
 wss.on('connection', (ws) => {
     console.log('Novo dispositivo conectado ao núcleo. Total:', wss.clients.size);
+    
+    // Envia o estado completo APENAS para o novo dispositivo que acabou de chegar
     enviarEstadoInicial(ws);
-    // Notifica todos os outros que entrou um novo dispositivo para atualizar o contador em tempo real
-    broadcastEstadoTotal();
+    
+    // Notifica APENAS a contagem atualizada para todos, sem reiniciar o vídeo de quem já assistia
+    broadcastContador();
 
     ws.on('message', (message) => {
         try {
@@ -139,8 +142,8 @@ wss.on('connection', (ws) => {
 
     ws.on('close', () => {
         console.log('Dispositivo desconectado. Total remanescente:', wss.clients.size);
-        // Atualiza o contador de todo mundo quando alguém sai
-        broadcastEstadoTotal();
+        // Atualiza o contador para todos de forma limpa quando alguém sai
+        broadcastContador();
     });
 });
 
@@ -158,6 +161,18 @@ function enviarEstadoInicial(ws) {
         };
         ws.send(JSON.stringify(payload));
     }
+}
+
+// Nova função leve para atualizar apenas o contador sem mexer na mídia dos outros
+function broadcastContador() {
+    const payload = JSON.stringify({
+        totalDispositivos: wss.clients.size
+    });
+    wss.clients.forEach((client) => {
+        if (client.readyState === WebSocket.OPEN) {
+            client.send(payload);
+        }
+    });
 }
 
 function broadcastParaTodos(obj) {
