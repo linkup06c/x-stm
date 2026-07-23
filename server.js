@@ -1,207 +1,134 @@
-const WebSocket = require('ws');
+const express = require('express');
 const http = require('http');
+const { WebSocketServer } = require('ws');
 
-const server = http.createServer((req, res) => {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ 
-        status: "online", 
-        totalDispositivos: dispositivosUnicosMap.size,
-        modoStandby: filaMidias.length === 0
-    }));
-});
+const app = express();
+const server = http.createServer(app);
+const wss = new WebSocketServer({ server });
 
-const wss = new WebSocket.Server({ server });
+app.use(express.json());
 
-let filaMidias = []; 
-let indiceReproduzindo = 0; 
-let isPlaying = false;
-let timestampInicioEpoch = 0; 
-let milissegundosAcumuladosAntesDoPause = 0; 
+// Estado global da transmissão
+let estadoGlobal = {
+    reproduzindo: false,
+    midiaAtual: null,
+    fila: []
+};
 
-// MAPA DE DISPOSITIVOS REAIS
-const dispositivosUnicosMap = new Map();
+// Notifica todos os clientes conectados sobre atualizações no estado
+function broadcastEstado() {
+    const dados = JSON.stringify({
+        comando: "ESTADO_TOTAL",
+        ...estadoGlobal
+    });
 
-function calcularTempoAtualMs() {
-    if (!isPlaying || filaMidias.length === 0) return milissegundosAcumuladosAntesDoPause;
-    return milissegundosAcumuladosAntesDoPause + (Date.now() - timestampInicioEpoch);
+    wss.clients.forEach(client => {
+        if (client.readyState === 1) { // OPEN
+            client.send(dados);
+        }
+    });
 }
 
-// SINCRONIZAÇÃO DA MÍDIA
-setInterval(() => {
-    if (isPlaying && filaMidias.length > 0) {
-        broadcastParaTodos({
-            comando: "SYNC_TEMPO", 
-            posicaoMs: calcularTempoAtualMs(),
-            timestampServidor: Date.now(), 
-            reproduzindo: isPlaying
-        });
-    }
-}, 1000);
-
-// RADAR ANTI-FANTASMA
-setInterval(() => {
-    wss.clients.forEach((ws) => {
-        if (ws.isAlive === false) {
-            return ws.terminate();
-        }
-        ws.isAlive = false;
-        ws.ping();
-    });
-}, 4000);
-
+// Conexão WebSocket
 wss.on('connection', (ws) => {
-    let meuIdRegistrado = null;
-    ws.isAlive = true;
+    console.log('Novo cliente conectado via WebSocket.');
 
-    ws.on('pong', () => { ws.isAlive = true; });
+    // Envia o estado atual assim que conecta
+    ws.send(JSON.stringify({
+        comando: "ESTADO_TOTAL",
+        ...estadoGlobal
+    }));
 
     ws.on('message', (message) => {
         try {
             const data = JSON.parse(message);
-
-            if (data.tipo === 'REGISTRAR_DISPOSITIVO' && data.deviceId) {
-                meuIdRegistrado = data.deviceId;
-                if (dispositivosUnicosMap.has(meuIdRegistrado)) {
-                    const socketAntigo = dispositivosUnicosMap.get(meuIdRegistrado);
-                    if (socketAntigo !== ws && socketAntigo.readyState === WebSocket.OPEN) {
-                        socketAntigo.close();
-                    }
-                }
-                dispositivosUnicosMap.set(meuIdRegistrado, ws);
-                enviarEstadoInicial(ws);
-                broadcastContador();
-                return;
-            }
-
-            if (data.tipo === 'DESCONECTAR') {
-                if (meuIdRegistrado && dispositivosUnicosMap.get(meuIdRegistrado) === ws) {
-                    dispositivosUnicosMap.delete(meuIdRegistrado);
-                    broadcastContador();
-                }
-                ws.close();
-                return;
-            }
-
-            const tipo = data.tipo || data.acao;
-            const url = data.url;
-            const slink = data.slink || data.comando;
-
-            if (tipo === 'midia' || tipo === 'adicionar_midia' || url) {
-                if (url) {
-                    const estavaVazio = filaMidias.length === 0;
-                    filaMidias.push({ id: Date.now().toString(), url: url, titulo: data.titulo || `Mídia ${filaMidias.length + 1}` });
-
-                    if (estavaVazio) {
-                        indiceReproduzindo = 0; 
-                        milissegundosAcumuladosAntesDoPause = 0; 
-                        timestampInicioEpoch = Date.now(); 
-                        isPlaying = true;
-                    }
-                    broadcastEstadoTotal();
-                }
-            } 
-            else if (tipo === 'proximo_video') {
-                if (filaMidias.length > 0) {
-                    filaMidias.shift(); // Consome/apaga o vídeo antigo
-                    milissegundosAcumuladosAntesDoPause = 0; 
-                    timestampInicioEpoch = Date.now(); 
-
-                    if (filaMidias.length > 0) {
-                        indiceReproduzindo = 0;
-                        isPlaying = true;
-                    } else {
-                        isPlaying = false; // Entra em Standby
-                    }
-                    broadcastEstadoTotal();
-                }
-            } 
-            else if (slink || tipo === 'comando') {
-                const cmd = slink || tipo;
-                if (cmd === 'clear' || cmd === 'limpar') { 
-                    filaMidias = []; 
-                    indiceReproduzindo = 0; 
-                    milissegundosAcumuladosAntesDoPause = 0; 
-                    isPlaying = false; 
-                }
-                else if (cmd === 'next') { 
-                    if (filaMidias.length > 0) {
-                        filaMidias.shift();
-                        milissegundosAcumuladosAntesDoPause = 0; 
-                        timestampInicioEpoch = Date.now();
-                        isPlaying = filaMidias.length > 0;
-                    } 
-                }
-                // AVANÇAR 15 SEGUNDOS REMOTAMENTE
-                else if (cmd === 'forward' || cmd === 'avancar_15') {
-                    if (isPlaying && filaMidias.length > 0) {
-                        let tempoAtual = calcularTempoAtualMs() + 15000;
-                        milissegundosAcumuladosAntesDoPause = tempoAtual;
-                        timestampInicioEpoch = Date.now();
-                    }
-                }
-                // VOLTAR 15 SEGUNDOS REMOTAMENTE
-                else if (cmd === 'rewind' || cmd === 'voltar_15') {
-                    if (isPlaying && filaMidias.length > 0) {
-                        let tempoAtual = Math.max(0, calcularTempoAtualMs() - 15000);
-                        milissegundosAcumuladosAntesDoPause = tempoAtual;
-                        timestampInicioEpoch = Date.now();
-                    }
-                }
-                else if (cmd === 'pause') { 
-                    if (isPlaying) { 
-                        milissegundosAcumuladosAntesDoPause = calcularTempoAtualMs(); 
-                        isPlaying = false; 
-                    } 
-                }
-                else if (cmd === 'play') { 
-                    if (!isPlaying && filaMidias.length > 0) { 
-                        timestampInicioEpoch = Date.now(); 
-                        isPlaying = true; 
-                    } 
-                }
-                broadcastEstadoTotal();
-            }
-        } catch (e) { }
+            processarAcao(data);
+        } catch (e) {
+            console.error('Erro ao processar mensagem do WebSocket:', e);
+        }
     });
 
     ws.on('close', () => {
-        if (meuIdRegistrado && dispositivosUnicosMap.get(meuIdRegistrado) === ws) {
-            dispositivosUnicosMap.delete(meuIdRegistrado);
-            broadcastContador();
-        }
+        console.log('Cliente desconectado.');
     });
 });
 
-function enviarEstadoInicial(ws) {
-    if (ws.readyState === WebSocket.OPEN) {
-        const emStandby = filaMidias.length === 0;
-        ws.send(JSON.stringify({
-            comando: "ESTADO_TOTAL", 
-            fila: filaMidias, 
-            indice: indiceReproduzindo,
-            modoStandby: emStandby,
-            midiaAtual: emStandby ? null : filaMidias[0],
-            posicaoMs: calcularTempoAtualMs(), 
-            timestampServidor: Date.now(),
-            reproduzindo: isPlaying, 
-            totalDispositivos: dispositivosUnicosMap.size
-        }));
+// Processamento unificado de comandos e mídias
+function processarAcao(dados) {
+    if (dados.tipo === 'midia') {
+        const novaMidia = {
+            url: dados.url,
+            titulo: dados.titulo || "Mídia sem título"
+        };
+        estadoGlobal.fila.push(novaMidia);
+        if (!estadoGlobal.midiaAtual) {
+            estadoGlobal.midiaAtual = novaMidia;
+            estadoGlobal.reproduzindo = true;
+        }
+    } else if (dados.tipo === 'comando' || dados.comando) {
+        const cmd = dados.comando || dados.slink;
+
+        switch (cmd) {
+            case 'play':
+                estadoGlobal.reproduzindo = true;
+                break;
+            case 'pause':
+                estadoGlobal.reproduzindo = false;
+                break;
+            case 'next':
+                if (estadoGlobal.fila.length > 0) {
+                    estadoGlobal.fila.shift();
+                    estadoGlobal.midiaAtual = estadoGlobal.fila[0] || null;
+                    estadoGlobal.reproduzindo = !!estadoGlobal.midiaAtual;
+                }
+                break;
+            case 'prev':
+                // Lógica de anterior ou reinício se necessário
+                break;
+            case 'rewind_15':
+                console.log('Comando recebido: Voltar 15 segundos');
+                break;
+            case 'forward_15':
+                console.log('Comando recebido: Avançar 15 segundos');
+                break;
+            case 'limpar':
+                estadoGlobal.fila = [];
+                estadoGlobal.midiaAtual = null;
+                estadoGlobal.reproduzindo = false;
+                break;
+            default:
+                console.log('Comando desconhecido:', cmd);
+                break;
+        }
     }
+    broadcastEstado();
 }
 
-function broadcastContador() {
-    const payload = JSON.stringify({ totalDispositivos: dispositivosUnicosMap.size });
-    dispositivosUnicosMap.forEach((client) => { if (client.readyState === WebSocket.OPEN) client.send(payload); });
-}
+// Rotas HTTP auxiliares
+app.post('/enviar', (req, res) => {
+    const { url, titulo } = req.body;
+    if (url) {
+        processarAcao({ tipo: 'midia', url, titulo });
+        return res.status(200).json({ sucesso: true, mensagem: 'Mídia adicionada com sucesso.' });
+    }
+    res.status(400).json({ sucesso: false, erro: 'URL não informada.' });
+});
 
-function broadcastParaTodos(obj) {
-    obj.totalDispositivos = dispositivosUnicosMap.size;
-    obj.modoStandby = filaMidias.length === 0;
-    const str = JSON.stringify(obj);
-    dispositivosUnicosMap.forEach((client) => { if (client.readyState === WebSocket.OPEN) client.send(str); });
-}
+app.post('/controle', (req, res) => {
+    const { comando, slink } = req.body;
+    const acao = comando || slink;
+    if (acao) {
+        processarAcao({ tipo: 'comando', comando: acao });
+        return res.status(200).json({ sucesso: true, comando: acao });
+    }
+    res.status(400).json({ sucesso: false, erro: 'Comando não informado.' });
+});
 
-function broadcastEstadoTotal() { dispositivosUnicosMap.forEach((client) => enviarEstadoInicial(client)); }
+app.get('/', (req, res) => {
+    res.send('X-Stream Server rodando perfeitamente!');
+});
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`Servidor rodando na porta ${PORT}`));
+server.listen(PORT, () => {
+    console.log(`Servidor X-Stream rodando na porta ${PORT}`);
+});
