@@ -1,5 +1,5 @@
 const WebSocket = require('ws');
-const http = require('http');
+const http = http = require('http'); // Mantido igual
 
 const server = http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -10,7 +10,7 @@ const server = http.createServer((req, res) => {
         indice: indiceReproduzindo,
         tempoMs: calcularTempoAtualMs(),
         play: isPlaying,
-        totalDispositivos: wss ? wss.clients.size : 0
+        totalDispositivos: clientesConectados.size
     }));
 });
 
@@ -24,6 +24,9 @@ let isPlaying = false;
 let timestampInicioEpoch = 0; 
 let milissegundosAcumuladosAntesDoPause = 0; 
 
+// MAPA DE CLIENTES REAIS (Garante contagem exata sem duplicar ou acumular)
+const clientesConectados = new Map();
+
 function calcularTempoAtualMs() {
     if (!isPlaying || filaMidias.length === 0) {
         return milissegundosAcumuladosAntesDoPause;
@@ -33,7 +36,7 @@ function calcularTempoAtualMs() {
     return milissegundosAcumuladosAntesDoPause + decorrido;
 }
 
-// RELÓGIO MESTRE DE ALTA PRECISÃO (Envia o sync de tempo e o total de dispositivos juntos de forma otimizada)
+// RELÓGIO MESTRE DE ALTA PRECISÃO
 setInterval(() => {
     if (isPlaying && filaMidias.length > 0) {
         broadcastParaTodos({
@@ -41,18 +44,22 @@ setInterval(() => {
             posicaoMs: calcularTempoAtualMs(),
             timestampServidor: Date.now(),
             reproduzindo: isPlaying,
-            totalDispositivos: wss.clients.size
+            totalDispositivos: clientesConectados.size
         });
     }
 }, 1000);
 
-wss.on('connection', (ws) => {
-    console.log('Novo dispositivo conectado ao núcleo. Total:', wss.clients.size);
+wss.on('connection', (ws, req) => {
+    // Cria um ID único para este cliente baseado no IP remoto e timestamp
+    const clientId = req.socket.remoteAddress + "_" + Date.now();
+    clientesConectados.set(ws, clientId);
+
+    console.log('Novo dispositivo conectado. Total real:', clientesConectados.size);
     
-    // Envia o estado completo APENAS para o novo dispositivo que acabou de chegar
+    // Envia o estado completo APENAS para quem acabou de chegar
     enviarEstadoInicial(ws);
     
-    // Notifica APENAS a contagem atualizada para todos, sem reiniciar o vídeo de quem já assistia
+    // Atualiza o contador exato para todos
     broadcastContador();
 
     ws.on('message', (message) => {
@@ -141,8 +148,16 @@ wss.on('connection', (ws) => {
     });
 
     ws.on('close', () => {
-        console.log('Dispositivo desconectado. Total remanescente:', wss.clients.size);
-        // Atualiza o contador para todos de forma limpa quando alguém sai
+        // Remove estritamente este socket do mapa de ativos
+        clientesConectados.delete(ws);
+        console.log('Dispositivo desconectado. Total remanescente real:', clientesConectados.size);
+        
+        // Atualiza o contador real para todos
+        broadcastContador();
+    });
+
+    ws.on('error', () => {
+        clientesConectados.delete(ws);
         broadcastContador();
     });
 });
@@ -157,18 +172,17 @@ function enviarEstadoInicial(ws) {
             posicaoMs: calcularTempoAtualMs(),
             timestampServidor: Date.now(),
             reproduzindo: isPlaying,
-            totalDispositivos: wss.clients.size
+            totalDispositivos: clientesConectados.size
         };
         ws.send(JSON.stringify(payload));
     }
 }
 
-// Nova função leve para atualizar apenas o contador sem mexer na mídia dos outros
 function broadcastContador() {
     const payload = JSON.stringify({
-        totalDispositivos: wss.clients.size
+        totalDispositivos: clientesConectados.size
     });
-    wss.clients.forEach((client) => {
+    clientesConectados.forEach((id, client) => {
         if (client.readyState === WebSocket.OPEN) {
             client.send(payload);
         }
@@ -176,8 +190,9 @@ function broadcastContador() {
 }
 
 function broadcastParaTodos(obj) {
+    obj.totalDispositivos = clientesConectados.size;
     const str = JSON.stringify(obj);
-    wss.clients.forEach((client) => {
+    clientesConectados.forEach((id, client) => {
         if (client.readyState === WebSocket.OPEN) {
             client.send(str);
         }
@@ -185,7 +200,7 @@ function broadcastParaTodos(obj) {
 }
 
 function broadcastEstadoTotal() {
-    wss.clients.forEach((client) => {
+    clientesConectados.forEach((id, client) => {
         enviarEstadoInicial(client);
     });
 }
