@@ -6,7 +6,7 @@ const WebSocket = require('ws');
 const app = express();
 const server = http.createServer(app);
 
-// Configuração do Socket.io para a voz / sinalização WebRTC
+// Configuração do Socket.io para a voz / sinalização
 const io = new Server(server, {
   cors: { origin: "*" }
 });
