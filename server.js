@@ -8,7 +8,7 @@ const server = http.createServer((req, res) => {
         servidor: "X-Stream Universal Server-Driven",
         fila: filaMidias,
         indice: indiceReproduzindo,
-        tempo: calcularTempoAtual(),
+        tempoMs: calcularTempoAtualMs(),
         play: isPlaying
     }));
 });
@@ -19,25 +19,25 @@ let filaMidias = [];
 let indiceReproduzindo = 0; 
 let isPlaying = false;
 
-// Controle de tempo baseado em milissegundos absolutos (Elimina o drift do setInterval)
-let timestampInicioEpoch = 0; // Quando a mídia começou a tocar (ms)
-let segundosAcumuladosAntesDoPause = 0; // Quantos segundos já passaram antes de um pause
+// Controle de tempo de alta precisão em milissegundos (Sem arredondar para segundos inteiros)
+let timestampInicioEpoch = 0; 
+let milissegundosAcumuladosAntesDoPause = 0; 
 
-function calcularTempoAtual() {
+function calcularTempoAtualMs() {
     if (!isPlaying || filaMidias.length === 0) {
-        return segundosAcumuladosAntesDoPause;
+        return milissegundosAcumuladosAntesDoPause;
     }
     const agora = Date.now();
-    const milissegundosDecorridos = agora - timestampInicioEpoch;
-    return segundosAcumuladosAntesDoPause + Math.floor(milissegundosDecorridos / 1000);
+    const decorrido = agora - timestampInicioEpoch;
+    return milissegundosAcumuladosAntesDoPause + decorrido;
 }
 
-// RELÓGIO MESTRE ABSOLUTO (Pulso a cada 1 segundo com alta precisão)
+// RELÓGIO MESTRE DE ALTA PRECISÃO (Pulso a cada 1 segundo enviando milissegundos absolutos)
 setInterval(() => {
     if (isPlaying && filaMidias.length > 0) {
         broadcastParaTodos({
             comando: "SYNC_TEMPO",
-            posicao: calcularTempoAtual(),
+            posicaoMs: calcularTempoAtualMs(),
             timestampServidor: Date.now(),
             reproduzindo: isPlaying
         });
@@ -69,7 +69,7 @@ wss.on('connection', (ws) => {
 
                     if (filaMidias.length === 1) {
                         indiceReproduzindo = 0;
-                        segundosAcumuladosAntesDoPause = 0;
+                        milissegundosAcumuladosAntesDoPause = 0;
                         timestampInicioEpoch = Date.now();
                         isPlaying = true;
                     }
@@ -84,7 +84,7 @@ wss.on('connection', (ws) => {
                     if (indiceReproduzindo >= filaMidias.length) {
                         indiceReproduzindo = 0; 
                     }
-                    segundosAcumuladosAntesDoPause = 0;
+                    milissegundosAcumuladosAntesDoPause = 0;
                     timestampInicioEpoch = Date.now();
                     isPlaying = true;
                     broadcastEstadoTotal();
@@ -98,25 +98,25 @@ wss.on('connection', (ws) => {
                 if (cmd === 'clear' || cmd === 'limpar') {
                     filaMidias = [];
                     indiceReproduzindo = 0;
-                    segundosAcumuladosAntesDoPause = 0;
+                    milissegundosAcumuladosAntesDoPause = 0;
                     isPlaying = false;
                 } else if (cmd === 'next') {
                     if (filaMidias.length > 0) {
                         indiceReproduzindo = (indiceReproduzindo + 1) % filaMidias.length;
-                        segundosAcumuladosAntesDoPause = 0;
+                        milissegundosAcumuladosAntesDoPause = 0;
                         timestampInicioEpoch = Date.now();
                         isPlaying = true;
                     }
                 } else if (cmd === 'prev') {
                     if (filaMidias.length > 0) {
                         indiceReproduzindo = (indiceReproduzindo - 1 + filaMidias.length) % filaMidias.length;
-                        segundosAcumuladosAntesDoPause = 0;
+                        milissegundosAcumuladosAntesDoPause = 0;
                         timestampInicioEpoch = Date.now();
                         isPlaying = true;
                     }
                 } else if (cmd === 'pause') {
                     if (isPlaying) {
-                        segundosAcumuladosAntesDoPause = calcularTempoAtual();
+                        milissegundosAcumuladosAntesDoPause = calcularTempoAtualMs();
                         isPlaying = false;
                     }
                 } else if (cmd === 'play') {
@@ -145,7 +145,7 @@ function enviarEstadoInicial(ws) {
             fila: filaMidias,
             indice: indiceReproduzindo,
             midiaAtual: filaMidias.length > 0 ? filaMidias[indiceReproduzindo] : null,
-            posicao: calcularTempoAtual(),
+            posicaoMs: calcularTempoAtualMs(),
             timestampServidor: Date.now(),
             reproduzindo: isPlaying
         };
@@ -170,5 +170,5 @@ function broadcastEstadoTotal() {
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-    console.log(`Servidor definitivo rodando na porta ${PORT}`);
+    console.log(`Servidor de alta precisão rodando na porta ${PORT}`);
 });
