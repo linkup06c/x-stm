@@ -90,7 +90,7 @@ wss.on('connection', (ws) => {
                 if (url) {
                     const estavaVazio = filaMidias.length === 0;
                     filaMidias.push({ id: Date.now().toString(), url: url, titulo: data.titulo || `Mídia ${filaMidias.length + 1}` });
-                    
+
                     if (estavaVazio) {
                         indiceReproduzindo = 0; 
                         milissegundosAcumuladosAntesDoPause = 0; 
@@ -110,7 +110,7 @@ wss.on('connection', (ws) => {
                         indiceReproduzindo = 0;
                         isPlaying = true;
                     } else {
-                        isPlaying = false; // Entra em Standby local
+                        isPlaying = false; // Entra em Standby
                     }
                     broadcastEstadoTotal();
                 }
@@ -130,6 +130,22 @@ wss.on('connection', (ws) => {
                         timestampInicioEpoch = Date.now();
                         isPlaying = filaMidias.length > 0;
                     } 
+                }
+                // AVANÇAR 15 SEGUNDOS REMOTAMENTE
+                else if (cmd === 'forward' || cmd === 'avancar_15') {
+                    if (isPlaying && filaMidias.length > 0) {
+                        let tempoAtual = calcularTempoAtualMs() + 15000;
+                        milissegundosAcumuladosAntesDoPause = tempoAtual;
+                        timestampInicioEpoch = Date.now();
+                    }
+                }
+                // VOLTAR 15 SEGUNDOS REMOTAMENTE
+                else if (cmd === 'rewind' || cmd === 'voltar_15') {
+                    if (isPlaying && filaMidias.length > 0) {
+                        let tempoAtual = Math.max(0, calcularTempoAtualMs() - 15000);
+                        milissegundosAcumuladosAntesDoPause = tempoAtual;
+                        timestampInicioEpoch = Date.now();
+                    }
                 }
                 else if (cmd === 'pause') { 
                     if (isPlaying) { 
