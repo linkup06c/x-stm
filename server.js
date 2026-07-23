@@ -1,142 +1,147 @@
-const express = require("express");
-const http = require("http");
-const { Server } = require("socket.io");
+const WebSocket = require('ws');
+const http = require('http');
 
-const app = express();
-const server = http.createServer(app);
-
-const io = new Server(server, {
-  cors: { origin: "*" }
+const server = http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ status: "online", totalDispositivos: dispositivosUnicosMap.size }));
 });
+
+const wss = new WebSocket.Server({ server });
 
 let filaMidias = []; 
 let indiceReproduzindo = 0; 
 let isPlaying = false;
 let timestampInicioEpoch = 0; 
 let milissegundosAcumuladosAntesDoPause = 0; 
-const activeUsers = new Map();
+
+// MAPA DE DISPOSITIVOS REAIS
+const dispositivosUnicosMap = new Map();
 
 function calcularTempoAtualMs() {
     if (!isPlaying || filaMidias.length === 0) return milissegundosAcumuladosAntesDoPause;
     return milissegundosAcumuladosAntesDoPause + (Date.now() - timestampInicioEpoch);
 }
 
+// SINCRONIZAÇÃO DA MÍDIA
 setInterval(() => {
     if (isPlaying && filaMidias.length > 0) {
-        io.emit("message", JSON.stringify({
-            comando: "SYNC_TEMPO", 
-            posicaoMs: calcularTempoAtualMs(),
-            timestampServidor: Date.now(), 
-            reproduzindo: isPlaying,
-            totalDispositivos: io.engine.clientsCount
-        }));
+        broadcastParaTodos({
+            comando: "SYNC_TEMPO", posicaoMs: calcularTempoAtualMs(),
+            timestampServidor: Date.now(), reproduzindo: isPlaying
+        });
     }
 }, 1000);
 
-io.on("connection", (socket) => {
-  socket.emit("message", JSON.stringify({
-      comando: "ESTADO_TOTAL", 
-      fila: filaMidias, 
-      indice: indiceReproduzindo,
-      midiaAtual: filaMidias.length > 0 ? filaMidias[indiceReproduzindo] : null,
-      posicaoMs: calcularTempoAtualMs(), 
-      timestampServidor: Date.now(),
-      reproduzindo: isPlaying, 
-      totalDispositivos: io.engine.clientsCount
-  }));
+// RADAR ANTI-FANTASMA (Limpa quem ficou travado a cada 4 segundos)
+setInterval(() => {
+    wss.clients.forEach((ws) => {
+        if (ws.isAlive === false) {
+            console.log('Derrubando conexao fantasma!');
+            return ws.terminate(); // Força a queda
+        }
+        ws.isAlive = false;
+        ws.ping();
+    });
+}, 4000);
 
-  socket.on("join-room", (data) => {
-    const room = data.room || "sala_principal_xstream";
-    const user = data.user;
+wss.on('connection', (ws) => {
+    let meuIdRegistrado = null;
+    ws.isAlive = true;
 
-    if (user && user.id && activeUsers.has(user.id)) {
-      const oldSocketId = activeUsers.get(user.id);
-      const oldSocket = io.sockets.sockets.get(oldSocketId);
-      if (oldSocket) oldSocket.disconnect(true);
-    }
+    ws.on('pong', () => { ws.isAlive = true; });
 
-    if (user && user.id) {
-      activeUsers.set(user.id, socket.id);
-    }
+    ws.on('message', (message) => {
+        try {
+            const data = JSON.parse(message);
 
-    socket.join(room);
-    socket.user = user;
-    socket.room = room;
+            // 1. APARELHO ENTROU
+            if (data.tipo === 'REGISTRAR_DISPOSITIVO' && data.deviceId) {
+                meuIdRegistrado = data.deviceId;
+                if (dispositivosUnicosMap.has(meuIdRegistrado)) {
+                    const socketAntigo = dispositivosUnicosMap.get(meuIdRegistrado);
+                    if (socketAntigo !== ws && socketAntigo.readyState === WebSocket.OPEN) {
+                        socketAntigo.close();
+                    }
+                }
+                dispositivosUnicosMap.set(meuIdRegistrado, ws);
+                console.log(`ENTROU: ${meuIdRegistrado} | Total na tela: ${dispositivosUnicosMap.size}`);
+                enviarEstadoInicial(ws);
+                broadcastContador();
+                return;
+            }
 
-    const clients = Array.from(io.sockets.sockets.values())
-      .filter(s => s.room === room && s.user)
-      .map(s => ({ id: s.id, user: s.user }));
+            // 2. APARELHO AVISOU QUE SAIU (Botão Home, Minimizar, etc)
+            if (data.tipo === 'DESCONECTAR') {
+                if (meuIdRegistrado && dispositivosUnicosMap.get(meuIdRegistrado) === ws) {
+                    dispositivosUnicosMap.delete(meuIdRegistrado);
+                    console.log(`SAIU RAPIDO: ${meuIdRegistrado} | Total na tela: ${dispositivosUnicosMap.size}`);
+                    broadcastContador();
+                }
+                ws.close();
+                return;
+            }
 
-    socket.emit("room-users", clients);
-    socket.to(room).emit("user-joined", { id: socket.id, user });
-    io.emit("message", JSON.stringify({ totalDispositivos: io.engine.clientsCount }));
-  });
+            const tipo = data.tipo || data.acao;
+            const url = data.url;
+            const slink = data.slink || data.comando;
 
-  socket.on("signal", (data) => {
-    if (data && data.to) {
-      io.to(data.to).emit("signal", { from: socket.id, signal: data.signal });
-    }
-  });
+            if (tipo === 'midia' || tipo === 'adicionar_midia' || url) {
+                if (url) {
+                    filaMidias.push({ id: Date.now().toString(), url: url, titulo: data.titulo || `Mídia ${filaMidias.length + 1}` });
+                    if (filaMidias.length === 1) { indiceReproduzindo = 0; milissegundosAcumuladosAntesDoPause = 0; timestampInicioEpoch = Date.now(); isPlaying = true; }
+                    broadcastEstadoTotal();
+                }
+            } else if (tipo === 'proximo_video') {
+                if (filaMidias.length > 0) {
+                    indiceReproduzindo = (indiceReproduzindo + 1) % filaMidias.length;
+                    milissegundosAcumuladosAntesDoPause = 0; timestampInicioEpoch = Date.now(); isPlaying = true;
+                    broadcastEstadoTotal();
+                }
+            } else if (slink || tipo === 'comando') {
+                const cmd = slink || tipo;
+                if (cmd === 'clear' || cmd === 'limpar') { filaMidias = []; indiceReproduzindo = 0; milissegundosAcumuladosAntesDoPause = 0; isPlaying = false; }
+                else if (cmd === 'next') { if (filaMidias.length > 0) { indiceReproduzindo = (indiceReproduzindo + 1) % filaMidias.length; milissegundosAcumuladosAntesDoPause = 0; timestampInicioEpoch = Date.now(); isPlaying = true; } }
+                else if (cmd === 'prev') { if (filaMidias.length > 0) { indiceReproduzindo = (indiceReproduzindo - 1 + filaMidias.length) % filaMidias.length; milissegundosAcumuladosAntesDoPause = 0; timestampInicioEpoch = Date.now(); isPlaying = true; } }
+                else if (cmd === 'pause') { if (isPlaying) { milissegundosAcumuladosAntesDoPause = calcularTempoAtualMs(); isPlaying = false; } }
+                else if (cmd === 'play') { if (!isPlaying) { timestampInicioEpoch = Date.now(); isPlaying = true; } }
+                broadcastEstadoTotal();
+            }
+        } catch (e) { }
+    });
 
-  socket.on("message", (msgStr) => {
-    try {
-      const data = typeof msgStr === 'string' ? JSON.parse(msgStr) : msgStr;
-      const tipo = data.tipo || data.acao;
-      const url = data.url;
-      const slink = data.slink || data.comando;
-
-      if (tipo === 'midia' || tipo === 'adicionar_midia' || url) {
-          if (url) {
-              filaMidias.push({ id: Date.now().toString(), url: url, titulo: data.titulo || `Mídia ${filaMidias.length + 1}` });
-              if (filaMidias.length === 1) { indiceReproduzindo = 0; milissegundosAcumuladosAntesDoPause = 0; timestampInicioEpoch = Date.now(); isPlaying = true; }
-              broadcastEstadoTotal();
-          }
-      } else if (tipo === 'proximo_video') {
-          if (filaMidias.length > 0) {
-              indiceReproduzindo = (indiceReproduzindo + 1) % filaMidias.length;
-              milissegundosAcumuladosAntesDoPause = 0; timestampInicioEpoch = Date.now(); isPlaying = true;
-              broadcastEstadoTotal();
-          }
-      } else if (slink || tipo === 'comando') {
-          const cmd = slink || tipo;
-          if (cmd === 'clear' || cmd === 'limpar') { filaMidias = []; indiceReproduzindo = 0; milissegundosAcumuladosAntesDoPause = 0; isPlaying = false; }
-          else if (cmd === 'next') { if (filaMidias.length > 0) { indiceReproduzindo = (indiceReproduzindo + 1) % filaMidias.length; milissegundosAcumuladosAntesDoPause = 0; timestampInicioEpoch = Date.now(); isPlaying = true; } }
-          else if (cmd === 'prev') { if (filaMidias.length > 0) { indiceReproduzindo = (indiceReproduzindo - 1 + filaMidias.length) % filaMidias.length; milissegundosAcumuladosAntesDoPause = 0; timestampInicioEpoch = Date.now(); isPlaying = true; } }
-          else if (cmd === 'pause') { if (isPlaying) { milissegundosAcumuladosAntesDoPause = calcularTempoAtualMs(); isPlaying = false; } }
-          else if (cmd === 'play') { if (!isPlaying) { timestampInicioEpoch = Date.now(); isPlaying = true; } }
-          broadcastEstadoTotal();
-      }
-    } catch (e) {}
-  });
-
-  socket.on("disconnect", () => {
-    if (socket.user && socket.user.id) {
-      activeUsers.delete(socket.user.id);
-    }
-    if (socket.room) {
-      socket.to(socket.room).emit("user-left", socket.id);
-    }
-    io.emit("message", JSON.stringify({ totalDispositivos: io.engine.clientsCount }));
-  });
+    // 3. SE O APARELHO FECHAR POR ERRO OU QUEDA DE ENERGIA
+    ws.on('close', () => {
+        if (meuIdRegistrado && dispositivosUnicosMap.get(meuIdRegistrado) === ws) {
+            dispositivosUnicosMap.delete(meuIdRegistrado);
+            console.log(`SAIU (Desconexao Nativa): ${meuIdRegistrado} | Total na tela: ${dispositivosUnicosMap.size}`);
+            broadcastContador();
+        }
+    });
 });
 
-function broadcastEstadoTotal() {
-    const payload = JSON.stringify({
-        comando: "ESTADO_TOTAL", 
-        fila: filaMidias, 
-        indice: indiceReproduzindo,
-        midiaAtual: filaMidias.length > 0 ? filaMidias[indiceReproduzindo] : null,
-        posicaoMs: calcularTempoAtualMs(), 
-        timestampServidor: Date.now(),
-        reproduzindo: isPlaying, 
-        totalDispositivos: io.engine.clientsCount
-    });
-    io.emit("message", payload);
+function enviarEstadoInicial(ws) {
+    if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({
+            comando: "ESTADO_TOTAL", fila: filaMidias, indice: indiceReproduzindo,
+            midiaAtual: filaMidias.length > 0 ? filaMidias[indiceReproduzindo] : null,
+            posicaoMs: calcularTempoAtualMs(), timestampServidor: Date.now(),
+            reproduzindo: isPlaying, totalDispositivos: dispositivosUnicosMap.size
+        }));
+    }
 }
 
-app.get('/', (req, res) => {
-    res.json({ status: "online", totalDispositivos: io.engine.clientsCount });
-});
+function broadcastContador() {
+    const payload = JSON.stringify({ totalDispositivos: dispositivosUnicosMap.size });
+    dispositivosUnicosMap.forEach((client) => { if (client.readyState === WebSocket.OPEN) client.send(payload); });
+}
+
+function broadcastParaTodos(obj) {
+    obj.totalDispositivos = dispositivosUnicosMap.size;
+    const str = JSON.stringify(obj);
+    dispositivosUnicosMap.forEach((client) => { if (client.readyState === WebSocket.OPEN) client.send(str); });
+}
+
+function broadcastEstadoTotal() { dispositivosUnicosMap.forEach((client) => enviarEstadoInicial(client)); }
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT);
+server.listen(PORT, () => console.log(`Servidor rodando na porta ${PORT}`));
