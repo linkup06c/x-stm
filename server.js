@@ -6,23 +6,20 @@ const WebSocket = require('ws');
 const app = express();
 const server = http.createServer(app);
 
-// Configuração do Socket.io para a Chamada de Voz (WebRTC)
+// Configuração do Socket.io para a voz / sinalização WebRTC
 const io = new Server(server, {
   cors: { origin: "*" }
 });
 
-// Canal fixo padrão para evitar que o pessoal misture as chamadas
-const SALA_UNICA_VOZ = "sala_principal_carro";
-const activeUsers = new Map(); // user.id -> socket.id
+const SALA_UNICA_VOZ = "sala_principal_xstream";
+const activeUsers = new Map();
 
 io.on("connection", (socket) => {
-  console.log("Novo cliente conectado na voz (Socket.io):", socket.id);
+  console.log("Cliente conectado na voz:", socket.id);
 
-  // Usuário entra direto na sala padrão sem opção de misturar canal
   socket.on("join-room", ({ user }) => {
     const room = SALA_UNICA_VOZ;
 
-    // Remove duplicado se o mesmo usuário reconectar
     if (user && user.id && activeUsers.has(user.id)) {
       const oldSocketId = activeUsers.get(user.id);
       const oldSocket = io.sockets.sockets.get(oldSocketId);
@@ -37,35 +34,21 @@ io.on("connection", (socket) => {
     socket.user = user;
     socket.room = room;
 
-    // Envia a lista atual de quem está na sala para o novo entrante
     const clients = Array.from(io.sockets.sockets.values())
       .filter(s => s.room === room && s.user)
-      .map(s => ({
-        id: s.id,
-        user: s.user
-      }));
+      .map(s => ({ id: s.id, user: s.user }));
 
     socket.emit("room-users", clients);
-
-    // Avisa os outros que alguém entrou
-    socket.to(room).emit("user-joined", {
-      id: socket.id,
-      user
-    });
+    socket.to(room).emit("user-joined", { id: socket.id, user });
   });
 
-  // Sinalização WebRTC (Troca de dados de áudio P2P entre os carros/celulares)
   socket.on("signal", (data) => {
     if (data && data.to) {
-      io.to(data.to).emit("signal", {
-        from: socket.id,
-        signal: data.signal
-      });
+      io.to(data.to).emit("signal", { from: socket.id, signal: data.signal });
     }
   });
 
   socket.on("disconnect", () => {
-    console.log("Cliente saiu da voz:", socket.id);
     if (socket.user && socket.user.id) {
       activeUsers.delete(socket.user.id);
     }
@@ -75,9 +58,7 @@ io.on("connection", (socket) => {
   });
 });
 
-// ==========================================================
-// SEÇÃO DO WEBSOCKET TRADICIONAL (Para Fila de Mídia e Comandos)
-// ==========================================================
+// WebSocket Tradicional para Fila de Mídia e Sincronização
 const wss = new WebSocket.Server({ noServer: true });
 
 let filaMidias = []; 
@@ -85,7 +66,6 @@ let indiceReproduzindo = 0;
 let isPlaying = false;
 let timestampInicioEpoch = 0; 
 let milissegundosAcumuladosAntesDoPause = 0; 
-
 const dispositivosUnicosMap = new Map();
 
 function calcularTempoAtualMs() {
@@ -93,7 +73,6 @@ function calcularTempoAtualMs() {
     return milissegundosAcumuladosAntesDoPause + (Date.now() - timestampInicioEpoch);
 }
 
-// Sincronização periódica da mídia
 setInterval(() => {
     if (isPlaying && filaMidias.length > 0) {
         broadcastParaTodos({
@@ -161,7 +140,7 @@ wss.on('connection', (ws) => {
                 broadcastEstadoTotal();
             }
         } catch (e) {
-            console.error("Erro ao processar mensagem do WebSocket:", e.message);
+            console.error("Erro:", e.message);
         }
     });
 
@@ -173,9 +152,7 @@ wss.on('connection', (ws) => {
     });
 });
 
-// Faz o roteamento para aceitar HTTP normal, Socket.io (voz) e WebSocket (mídia) na mesma porta
 server.on('upgrade', (request, socket, head) => {
-    // Se a rota for do websocket de mídia
     wss.handleUpgrade(request, socket, head, (ws) => {
         wss.emit('connection', ws, request);
     });
@@ -210,4 +187,4 @@ function broadcastParaTodos(obj) {
 function broadcastEstadoTotal() { dispositivosUnicosMap.forEach((client) => enviarEstadoInicial(client)); }
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`Servidor unificado rodando na porta ${PORT}`));
+server.listen(PORT, () => console.log(`Servidor rodando na porta ${PORT}`));
