@@ -13,27 +13,26 @@ const server = http.createServer((req, res) => {
 
 const wss = new WebSocket.Server({ server });
 
-// --- ESTADO GLOBAL DO SERVIDOR (Tudo fica aqui para não precisar mexer nos APKs depois) ---
-let filaMidias = []; // Lista de links: [ { id, url, titulo } ]
-let indiceReproduzindo = 0; // Qual o índice da lista está rodando agora
+let filaMidias = []; 
+let indiceReproduzindo = 0; 
 let estadoGlobal = {
-    acao: "play", // play, pause, seek, stop
-    posicao: 0    // milissegundos se precisar sincronizar
+    acao: "play",
+    posicao: 0
 };
 
 wss.on('connection', (ws) => {
-    console.log('Novo cliente conectado ao servidor central.');
-
-    // 1. Assim que alguém conecta (Player ou Browser), envia o estado atual imediatamente
+    console.log('Cliente conectado com sucesso!');
     sincronizarCliente(ws);
 
     ws.on('message', (message) => {
         try {
             const data = JSON.parse(message);
-            console.log('Comando recebido:', data);
+            console.log('Mensagem recebida:', data);
 
-            // CASO 1: O Browser enviou um novo link para adicionar à fila
-            if (data.tipo === 'adicionar_midia' && data.url) {
+            const tipo = data.tipo;
+
+            // TRATAMENTO FLEXÍVEL: Aceita "midia" ou "adicionar_midia" vindo do Browser
+            if ((tipo === 'midia' || tipo === 'adicionar_midia') && data.url) {
                 const novaMidia = {
                     id: Date.now().toString(),
                     url: data.url,
@@ -41,28 +40,27 @@ wss.on('connection', (ws) => {
                 };
                 filaMidias.push(novaMidia);
 
-                // Se for o único item, já começa a reproduzir ele
+                // Se for a primeira mídia da fila, já define para tocar
                 if (filaMidias.length === 1) {
                     indiceReproduzindo = 0;
                 }
                 broadcastEstado();
             }
 
-            // CASO 2: O Player avisou que o vídeo atual acabou (Auto-Play / Próximo da Fila)
-            else if (data.tipo === 'proximo_video') {
+            // O Player avisou que o vídeo acabou
+            else if (tipo === 'proximo_video') {
                 if (filaMidias.length > 0) {
                     indiceReproduzindo++;
-                    // Se chegou ao fim da fila, faz o Loop e volta para o primeiro (índice 0)
                     if (indiceReproduzindo >= filaMidias.length) {
-                        indiceReproduzindo = 0;
+                        indiceReproduzindo = 0; // Loop automático para o primeiro
                     }
                 }
                 broadcastEstado();
             }
 
-            // CASO 3: Comando de controle remoto vindo do HTML (Play, Pause, Próximo, Anterior, Limpar Fila)
-            else if (data.tipo === 'comando') {
-                const cmd = data.slink; // Ex: "play", "pause", "next", "prev", "clear"
+            // Comandos de controle (Play, Pause, Próximo, Limpar)
+            else if (tipo === 'comando' || data.slink) {
+                const cmd = data.slink || data.acao;
 
                 if (cmd === 'clear' || cmd === 'limpar') {
                     filaMidias = [];
@@ -75,15 +73,14 @@ wss.on('connection', (ws) => {
                     if (filaMidias.length > 0) {
                         indiceReproduzindo = (indiceReproduzindo - 1 + filaMidias.length) % filaMidias.length;
                     }
-                } else {
-                    // Armazena o estado de play/pause global
+                } else if (cmd) {
                     estadoGlobal.acao = cmd;
                 }
                 broadcastEstado();
             }
 
         } catch (e) {
-            console.error('Erro ao processar mensagem:', e);
+            console.error('Erro ao processar JSON:', e);
         }
     });
 
@@ -92,7 +89,6 @@ wss.on('connection', (ws) => {
     });
 });
 
-// Função para enviar o pacote completo de sincronização para um cliente específico
 function sincronizarCliente(ws) {
     if (ws.readyState === WebSocket.OPEN) {
         const payload = {
@@ -106,7 +102,6 @@ function sincronizarCliente(ws) {
     }
 }
 
-// Função para atualizar TODOS os conectados (Browser, Controle HTML e Player Android) ao mesmo tempo
 function broadcastEstado() {
     wss.clients.forEach((client) => {
         sincronizarCliente(client);
@@ -115,5 +110,5 @@ function broadcastEstado() {
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-    console.log(`Servidor Server-Driven rodando na porta ${PORT}`);
+    console.log(`Servidor rodando na porta ${PORT}`);
 });
