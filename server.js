@@ -10,7 +10,7 @@ const server = http.createServer((req, res) => {
         indice: indiceReproduzindo,
         tempoMs: calcularTempoAtualMs(),
         play: isPlaying,
-        totalDispositivos: clientesConectados.size
+        totalDispositivos: dispositivosUnicosMap.size
     }));
 });
 
@@ -20,12 +20,11 @@ let filaMidias = [];
 let indiceReproduzindo = 0; 
 let isPlaying = false;
 
-// Controle de tempo de alta precisão em milissegundos
 let timestampInicioEpoch = 0; 
 let milissegundosAcumuladosAntesDoPause = 0; 
 
-// MAPA DE CLIENTES REAIS (Garante contagem exata sem duplicar ou acumular)
-const clientesConectados = new Map();
+// MAPA DE DISPOSITIVOS ÚNICOS (Garante que cada aparelho conte apenas 1 vez pelo UUID)
+const dispositivosUnicosMap = new Map();
 
 function calcularTempoAtualMs() {
     if (!isPlaying || filaMidias.length === 0) {
@@ -44,24 +43,37 @@ setInterval(() => {
             posicaoMs: calcularTempoAtualMs(),
             timestampServidor: Date.now(),
             reproduzindo: isPlaying,
-            totalDispositivos: clientesConectados.size
+            totalDispositivos: dispositivosUnicosMap.size
         });
     }
 }, 1000);
 
-wss.on('connection', (ws, req) => {
-    const clientId = req.socket.remoteAddress + "_" + Date.now();
-    clientesConectados.set(ws, clientId);
-
-    console.log('Novo dispositivo conectado. Total real:', clientesConectados.size);
-    
-    enviarEstadoInicial(ws);
-    broadcastContador();
+wss.on('connection', (ws) => {
+    let meuIdRegistrado = null;
 
     ws.on('message', (message) => {
         try {
             const data = JSON.parse(message);
-            console.log('Comando recebido:', data);
+
+            // REGISTRO DE IDENTIDADE ÚNICA DO APARELHO VIA UUID
+            if (data.tipo === 'REGISTRAR_DISPOSITIVO' && data.deviceId) {
+                meuIdRegistrado = data.deviceId;
+
+                // Se houver conexão anterior duplicada do mesmo aparelho, fecha a antiga
+                if (dispositivosUnicosMap.has(meuIdRegistrado)) {
+                    const socketAntigo = dispositivosUnicosMap.get(meuIdRegistrado);
+                    if (socketAntigo !== ws && socketAntigo.readyState === WebSocket.OPEN) {
+                        socketAntigo.close();
+                    }
+                }
+
+                dispositivosUnicosMap.set(meuIdRegistrado, ws);
+                console.log('Dispositivo registrado/atualizado. Total real de telas:', dispositivosUnicosMap.size);
+
+                enviarEstadoInicial(ws);
+                broadcastContador();
+                return;
+            }
 
             const tipo = data.tipo || data.acao;
             const url = data.url;
@@ -144,14 +156,18 @@ wss.on('connection', (ws, req) => {
     });
 
     ws.on('close', () => {
-        clientesConectados.delete(ws);
-        console.log('Dispositivo desconectado. Total remanescente real:', clientesConectados.size);
-        broadcastContador();
+        if (meuIdRegistrado) {
+            dispositivosUnicosMap.delete(meuIdRegistrado);
+            console.log('Dispositivo desconectado. Total remanescente real:', dispositivosUnicosMap.size);
+            broadcastContador();
+        }
     });
 
     ws.on('error', () => {
-        clientesConectados.delete(ws);
-        broadcastContador();
+        if (meuIdRegistrado) {
+            dispositivosUnicosMap.delete(meuIdRegistrado);
+            broadcastContador();
+        }
     });
 });
 
@@ -165,17 +181,18 @@ function enviarEstadoInicial(ws) {
             posicaoMs: calcularTempoAtualMs(),
             timestampServidor: Date.now(),
             reproduzindo: isPlaying,
-            totalDispositivos: clientesConectados.size
+            totalDispositivos: dispositivosUnicosMap.size
         };
         ws.send(JSON.stringify(payload));
     }
 }
 
+// Envia apenas a contagem para não interferir na mídia dos outros aparelhos
 function broadcastContador() {
     const payload = JSON.stringify({
-        totalDispositivos: clientesConectados.size
+        totalDispositivos: dispositivosUnicosMap.size
     });
-    clientesConectados.forEach((id, client) => {
+    dispositivosUnicosMap.forEach((client) => {
         if (client.readyState === WebSocket.OPEN) {
             client.send(payload);
         }
@@ -183,9 +200,9 @@ function broadcastContador() {
 }
 
 function broadcastParaTodos(obj) {
-    obj.totalDispositivos = clientesConectados.size;
+    obj.totalDispositivos = dispositivosUnicosMap.size;
     const str = JSON.stringify(obj);
-    clientesConectados.forEach((id, client) => {
+    dispositivosUnicosMap.forEach((client) => {
         if (client.readyState === WebSocket.OPEN) {
             client.send(str);
         }
@@ -193,7 +210,7 @@ function broadcastParaTodos(obj) {
 }
 
 function broadcastEstadoTotal() {
-    clientesConectados.forEach((id, client) => {
+    dispositivosUnicosMap.forEach((client) => {
         enviarEstadoInicial(client);
     });
 }
