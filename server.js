@@ -3,15 +3,7 @@ const http = require('http');
 
 const server = http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({
-        status: "online",
-        servidor: "X-Stream Universal Server-Driven",
-        fila: filaMidias,
-        indice: indiceReproduzindo,
-        tempoMs: calcularTempoAtualMs(),
-        play: isPlaying,
-        totalDispositivos: dispositivosUnicosMap.size
-    }));
+    res.end(JSON.stringify({ status: "online", totalDispositivos: dispositivosUnicosMap.size }));
 });
 
 const wss = new WebSocket.Server({ server });
@@ -22,36 +14,35 @@ let isPlaying = false;
 let timestampInicioEpoch = 0; 
 let milissegundosAcumuladosAntesDoPause = 0; 
 
-// MAPA DE DISPOSITIVOS
+// MAPA DE DISPOSITIVOS REAIS
 const dispositivosUnicosMap = new Map();
 
 function calcularTempoAtualMs() {
-    if (!isPlaying || filaMidias.length === 0) {
-        return milissegundosAcumuladosAntesDoPause;
-    }
+    if (!isPlaying || filaMidias.length === 0) return milissegundosAcumuladosAntesDoPause;
     return milissegundosAcumuladosAntesDoPause + (Date.now() - timestampInicioEpoch);
 }
 
-// SINCRONIZAÇÃO DE TEMPO
+// SINCRONIZAÇÃO DA MÍDIA
 setInterval(() => {
     if (isPlaying && filaMidias.length > 0) {
         broadcastParaTodos({
-            comando: "SYNC_TEMPO",
-            posicaoMs: calcularTempoAtualMs(),
-            timestampServidor: Date.now(),
-            reproduzindo: isPlaying
+            comando: "SYNC_TEMPO", posicaoMs: calcularTempoAtualMs(),
+            timestampServidor: Date.now(), reproduzindo: isPlaying
         });
     }
 }, 1000);
 
-// DETECTOR DE CONEXÕES FANTASMAS (Mata sockets travados a cada 10s)
+// RADAR ANTI-FANTASMA (Limpa quem ficou travado a cada 4 segundos)
 setInterval(() => {
     wss.clients.forEach((ws) => {
-        if (ws.isAlive === false) return ws.terminate();
+        if (ws.isAlive === false) {
+            console.log('Derrubando conexao fantasma!');
+            return ws.terminate(); // Força a queda
+        }
         ws.isAlive = false;
         ws.ping();
     });
-}, 10000);
+}, 4000);
 
 wss.on('connection', (ws) => {
     let meuIdRegistrado = null;
@@ -63,20 +54,30 @@ wss.on('connection', (ws) => {
         try {
             const data = JSON.parse(message);
 
-            // 1. REGISTRO OFICIAL DO APARELHO
+            // 1. APARELHO ENTROU
             if (data.tipo === 'REGISTRAR_DISPOSITIVO' && data.deviceId) {
                 meuIdRegistrado = data.deviceId;
-
                 if (dispositivosUnicosMap.has(meuIdRegistrado)) {
                     const socketAntigo = dispositivosUnicosMap.get(meuIdRegistrado);
                     if (socketAntigo !== ws && socketAntigo.readyState === WebSocket.OPEN) {
                         socketAntigo.close();
                     }
                 }
-
                 dispositivosUnicosMap.set(meuIdRegistrado, ws);
+                console.log(`ENTROU: ${meuIdRegistrado} | Total na tela: ${dispositivosUnicosMap.size}`);
                 enviarEstadoInicial(ws);
                 broadcastContador();
+                return;
+            }
+
+            // 2. APARELHO AVISOU QUE SAIU (Botão Home, Minimizar, etc)
+            if (data.tipo === 'DESCONECTAR') {
+                if (meuIdRegistrado && dispositivosUnicosMap.get(meuIdRegistrado) === ws) {
+                    dispositivosUnicosMap.delete(meuIdRegistrado);
+                    console.log(`SAIU RAPIDO: ${meuIdRegistrado} | Total na tela: ${dispositivosUnicosMap.size}`);
+                    broadcastContador();
+                }
+                ws.close();
                 return;
             }
 
@@ -84,13 +85,10 @@ wss.on('connection', (ws) => {
             const url = data.url;
             const slink = data.slink || data.comando;
 
-            // 2. MÍDIAS E CONTROLES
             if (tipo === 'midia' || tipo === 'adicionar_midia' || url) {
                 if (url) {
                     filaMidias.push({ id: Date.now().toString(), url: url, titulo: data.titulo || `Mídia ${filaMidias.length + 1}` });
-                    if (filaMidias.length === 1) {
-                        indiceReproduzindo = 0; milissegundosAcumuladosAntesDoPause = 0; timestampInicioEpoch = Date.now(); isPlaying = true;
-                    }
+                    if (filaMidias.length === 1) { indiceReproduzindo = 0; milissegundosAcumuladosAntesDoPause = 0; timestampInicioEpoch = Date.now(); isPlaying = true; }
                     broadcastEstadoTotal();
                 }
             } else if (tipo === 'proximo_video') {
@@ -101,38 +99,22 @@ wss.on('connection', (ws) => {
                 }
             } else if (slink || tipo === 'comando') {
                 const cmd = slink || tipo;
-                if (cmd === 'clear' || cmd === 'limpar') {
-                    filaMidias = []; indiceReproduzindo = 0; milissegundosAcumuladosAntesDoPause = 0; isPlaying = false;
-                } else if (cmd === 'next') {
-                    if (filaMidias.length > 0) { indiceReproduzindo = (indiceReproduzindo + 1) % filaMidias.length; milissegundosAcumuladosAntesDoPause = 0; timestampInicioEpoch = Date.now(); isPlaying = true; }
-                } else if (cmd === 'prev') {
-                    if (filaMidias.length > 0) { indiceReproduzindo = (indiceReproduzindo - 1 + filaMidias.length) % filaMidias.length; milissegundosAcumuladosAntesDoPause = 0; timestampInicioEpoch = Date.now(); isPlaying = true; }
-                } else if (cmd === 'pause') {
-                    if (isPlaying) { milissegundosAcumuladosAntesDoPause = calcularTempoAtualMs(); isPlaying = false; }
-                } else if (cmd === 'play') {
-                    if (!isPlaying) { timestampInicioEpoch = Date.now(); isPlaying = true; }
-                }
+                if (cmd === 'clear' || cmd === 'limpar') { filaMidias = []; indiceReproduzindo = 0; milissegundosAcumuladosAntesDoPause = 0; isPlaying = false; }
+                else if (cmd === 'next') { if (filaMidias.length > 0) { indiceReproduzindo = (indiceReproduzindo + 1) % filaMidias.length; milissegundosAcumuladosAntesDoPause = 0; timestampInicioEpoch = Date.now(); isPlaying = true; } }
+                else if (cmd === 'prev') { if (filaMidias.length > 0) { indiceReproduzindo = (indiceReproduzindo - 1 + filaMidias.length) % filaMidias.length; milissegundosAcumuladosAntesDoPause = 0; timestampInicioEpoch = Date.now(); isPlaying = true; } }
+                else if (cmd === 'pause') { if (isPlaying) { milissegundosAcumuladosAntesDoPause = calcularTempoAtualMs(); isPlaying = false; } }
+                else if (cmd === 'play') { if (!isPlaying) { timestampInicioEpoch = Date.now(); isPlaying = true; } }
                 broadcastEstadoTotal();
             }
-        } catch (e) { console.error('Erro ao processar mensagem JSON:', e); }
+        } catch (e) { }
     });
 
+    // 3. SE O APARELHO FECHAR POR ERRO OU QUEDA DE ENERGIA
     ws.on('close', () => {
-        if (meuIdRegistrado) {
-            // A CORREÇÃO MÁGICA: Só deleta se o socket que caiu for o oficial atual!
-            if (dispositivosUnicosMap.get(meuIdRegistrado) === ws) {
-                dispositivosUnicosMap.delete(meuIdRegistrado);
-                broadcastContador();
-            }
-        }
-    });
-
-    ws.on('error', () => {
-        if (meuIdRegistrado) {
-            if (dispositivosUnicosMap.get(meuIdRegistrado) === ws) {
-                dispositivosUnicosMap.delete(meuIdRegistrado);
-                broadcastContador();
-            }
+        if (meuIdRegistrado && dispositivosUnicosMap.get(meuIdRegistrado) === ws) {
+            dispositivosUnicosMap.delete(meuIdRegistrado);
+            console.log(`SAIU (Desconexao Nativa): ${meuIdRegistrado} | Total na tela: ${dispositivosUnicosMap.size}`);
+            broadcastContador();
         }
     });
 });
@@ -150,22 +132,16 @@ function enviarEstadoInicial(ws) {
 
 function broadcastContador() {
     const payload = JSON.stringify({ totalDispositivos: dispositivosUnicosMap.size });
-    dispositivosUnicosMap.forEach((client) => {
-        if (client.readyState === WebSocket.OPEN) client.send(payload);
-    });
+    dispositivosUnicosMap.forEach((client) => { if (client.readyState === WebSocket.OPEN) client.send(payload); });
 }
 
 function broadcastParaTodos(obj) {
     obj.totalDispositivos = dispositivosUnicosMap.size;
     const str = JSON.stringify(obj);
-    dispositivosUnicosMap.forEach((client) => {
-        if (client.readyState === WebSocket.OPEN) client.send(str);
-    });
+    dispositivosUnicosMap.forEach((client) => { if (client.readyState === WebSocket.OPEN) client.send(str); });
 }
 
-function broadcastEstadoTotal() {
-    dispositivosUnicosMap.forEach((client) => enviarEstadoInicial(client));
-}
+function broadcastEstadoTotal() { dispositivosUnicosMap.forEach((client) => enviarEstadoInicial(client)); }
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => console.log(`Servidor rodando na porta ${PORT}`));
