@@ -8,7 +8,7 @@ const server = http.createServer((req, res) => {
         servidor: "X-Stream Universal Server-Driven",
         fila: filaMidias,
         indice: indiceReproduzindo,
-        tempo: tempoAtualSegundos,
+        tempo: calcularTempoAtual(),
         play: isPlaying
     }));
 });
@@ -17,21 +17,30 @@ const wss = new WebSocket.Server({ server });
 
 let filaMidias = []; 
 let indiceReproduzindo = 0; 
-let tempoAtualSegundos = 0; 
 let isPlaying = false;
 
-// RELÓGIO MESTRE DA TRANSMISSÃO (O coração batendo a cada 1 segundo)
+// Controle de tempo baseado em milissegundos absolutos (Elimina o drift do setInterval)
+let timestampInicioEpoch = 0; // Quando a mídia começou a tocar (ms)
+let segundosAcumuladosAntesDoPause = 0; // Quantos segundos já passaram antes de um pause
+
+function calcularTempoAtual() {
+    if (!isPlaying || filaMidias.length === 0) {
+        return segundosAcumuladosAntesDoPause;
+    }
+    const agora = Date.now();
+    const milissegundosDecorridos = agora - timestampInicioEpoch;
+    return segundosAcumuladosAntesDoPause + Math.floor(milissegundosDecorridos / 1000);
+}
+
+// RELÓGIO MESTRE ABSOLUTO (Pulso a cada 1 segundo com alta precisão)
 setInterval(() => {
     if (isPlaying && filaMidias.length > 0) {
-        tempoAtualSegundos++;
-        // Envia o pulso de tempo a cada 2 segundos para sincronizar todos os players
-        if (tempoAtualSegundos % 2 === 0) {
-            broadcastParaTodos({
-                comando: "SYNC_TEMPO",
-                posicao: tempoAtualSegundos,
-                reproduzindo: isPlaying
-            });
-        }
+        broadcastParaTodos({
+            comando: "SYNC_TEMPO",
+            posicao: calcularTempoAtual(),
+            timestampServidor: Date.now(),
+            reproduzindo: isPlaying
+        });
     }
 }, 1000);
 
@@ -58,54 +67,63 @@ wss.on('connection', (ws) => {
                     };
                     filaMidias.push(novaMidia);
 
-                    // Se for a única na fila, inicia o player imediatamente do zero
                     if (filaMidias.length === 1) {
                         indiceReproduzindo = 0;
-                        tempoAtualSegundos = 0;
+                        segundosAcumuladosAntesDoPause = 0;
+                        timestampInicioEpoch = Date.now();
                         isPlaying = true;
                     }
                     broadcastEstadoTotal();
                 }
             }
 
-            // 2. O PLAYER AVISOU QUE O VÍDEO ACABOU (Loop / Próximo)
+            // 2. O PLAYER AVISOU QUE O VÍDEO ACABOU
             else if (tipo === 'proximo_video') {
                 if (filaMidias.length > 0) {
                     indiceReproduzindo++;
                     if (indiceReproduzindo >= filaMidias.length) {
-                        indiceReproduzindo = 0; // Volta para o primeiro (Loop infinito)
+                        indiceReproduzindo = 0; 
                     }
-                    tempoAtualSegundos = 0;
+                    segundosAcumuladosAntesDoPause = 0;
+                    timestampInicioEpoch = Date.now();
                     isPlaying = true;
                     broadcastEstadoTotal();
                 }
             }
 
-            // 3. COMANDOS DE CONTROLE REMOTO (Play, Pause, Próximo, Limpar)
+            // 3. COMANDOS DE CONTROLE REMOTO
             else if (slink || tipo === 'comando') {
                 const cmd = slink || tipo;
 
                 if (cmd === 'clear' || cmd === 'limpar') {
                     filaMidias = [];
                     indiceReproduzindo = 0;
-                    tempoAtualSegundos = 0;
+                    segundosAcumuladosAntesDoPause = 0;
                     isPlaying = false;
                 } else if (cmd === 'next') {
                     if (filaMidias.length > 0) {
                         indiceReproduzindo = (indiceReproduzindo + 1) % filaMidias.length;
-                        tempoAtualSegundos = 0;
+                        segundosAcumuladosAntesDoPause = 0;
+                        timestampInicioEpoch = Date.now();
                         isPlaying = true;
                     }
                 } else if (cmd === 'prev') {
                     if (filaMidias.length > 0) {
                         indiceReproduzindo = (indiceReproduzindo - 1 + filaMidias.length) % filaMidias.length;
-                        tempoAtualSegundos = 0;
+                        segundosAcumuladosAntesDoPause = 0;
+                        timestampInicioEpoch = Date.now();
                         isPlaying = true;
                     }
                 } else if (cmd === 'pause') {
-                    isPlaying = false;
+                    if (isPlaying) {
+                        segundosAcumuladosAntesDoPause = calcularTempoAtual();
+                        isPlaying = false;
+                    }
                 } else if (cmd === 'play') {
-                    isPlaying = true;
+                    if (!isPlaying) {
+                        timestampInicioEpoch = Date.now();
+                        isPlaying = true;
+                    }
                 }
                 broadcastEstadoTotal();
             }
@@ -127,7 +145,8 @@ function enviarEstadoInicial(ws) {
             fila: filaMidias,
             indice: indiceReproduzindo,
             midiaAtual: filaMidias.length > 0 ? filaMidias[indiceReproduzindo] : null,
-            posicao: tempoAtualSegundos,
+            posicao: calcularTempoAtual(),
+            timestampServidor: Date.now(),
             reproduzindo: isPlaying
         };
         ws.send(JSON.stringify(payload));
