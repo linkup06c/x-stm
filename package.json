@@ -1,5 +1,5 @@
 {
-  "name": "x-stream-server",
+  "name": "x-stm",
   "version": "1.0.0",
   "description": "Servidor de relay em tempo real para o Player",
   "main": "server.js",
