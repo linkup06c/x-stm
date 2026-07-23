@@ -5,7 +5,12 @@ const server = http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
         status: "online",
-        tempoServidor: Math.floor(tempoAtualTransmissao),
+        versaoServidor: "2.0",
+        configuracoesRemotas: {
+            tempoSincroniaMs: 2000,
+            permitirLoop: true,
+            mensagemTela: "Transmissão ao vivo ativa"
+        },
         filaAtual: filaMidias,
         indiceAtual: indiceReproduzindo
     }));
@@ -15,58 +20,63 @@ const wss = new WebSocket.Server({ server });
 
 let filaMidias = []; 
 let indiceReproduzindo = 0; 
-let tempoAtualTransmissao = 0; // O "relógio" oficial da live em segundos
+let tempoAtualTransmissao = 0; 
 let isTransmitindo = false;
 
-// O CORAÇÃO BATE A CADA 1 SEGUNDO: Mantém o tempo oficial da live correndo
+// Relógio mestre da live
 setInterval(() => {
     if (isTransmitindo && filaMidias.length > 0) {
         tempoAtualTransmissao++;
-        
-        // Dispara a cada 2 segundos a posição exata para todos os players conectados (Sincronia Ao Vivo)
         if (tempoAtualTransmissao % 2 === 0) {
-            broadcastSincroniaTempo();
+            broadcastUniversal({
+                tipo: 'ACAO_SERVIDOR',
+                comando: 'SINCRONIZAR_TEMPO',
+                posicaoSegundos: tempoAtualTransmissao,
+                reproduzindo: isTransmitindo
+            });
         }
     }
 }, 1000);
 
 wss.on('connection', (ws) => {
-    console.log('Novo dispositivo conectado à transmissão ao vivo.');
-    enviarEstadoParaCliente(ws);
+    console.log('Cliente conectado ao núcleo universal.');
+    enviarEstadoUniversal(ws);
 
     ws.on('message', (message) => {
         try {
             const data = JSON.parse(message);
-            const tipo = data.tipo;
+            console.log('Comando recebido do app:', data);
 
-            if (tipo === 'midia' || tipo === 'adicionar_midia') {
+            // O servidor decide o que fazer com base na intenção, abstraindo o app
+            const acao = data.acao || data.tipo;
+
+            if (acao === 'ADICIONAR_MIDIA' || acao === 'midia') {
                 const novaMidia = {
                     id: Date.now().toString(),
                     url: data.url,
-                    titulo: data.titulo || `Transmissão ${filaMidias.length + 1}`
+                    titulo: data.titulo || `Mídia ${filaMidias.length + 1}`
                 };
                 filaMidias.push(novaMidia);
-
                 if (filaMidias.length === 1) {
                     indiceReproduzindo = 0;
                     tempoAtualTransmissao = 0;
                     isTransmitindo = true;
                 }
-                broadcastEstadoGeral();
+                broadcastEstadoUniversal();
             }
-            else if (tipo === 'proximo_video') {
+            else if (acao === 'PROXIMO_VIDEO' || acao === 'proximo_video') {
                 if (filaMidias.length > 0) {
                     indiceReproduzindo++;
                     if (indiceReproduzindo >= filaMidias.length) {
-                        indiceReproduzindo = 0; // Loop da grade ao vivo
+                        indiceReproduzindo = 0;
                     }
-                    tempoAtualTransmissao = 0; // Reseta o relógio para o novo vídeo
+                    tempoAtualTransmissao = 0;
                     isTransmitindo = true;
                 }
-                broadcastEstadoGeral();
+                broadcastEstadoUniversal();
             }
-            else if (tipo === 'comando' || data.slink) {
-                const cmd = data.slink || data.acao;
+            else if (acao === 'CONTROLE_GERAL' || data.slink) {
+                const cmd = data.slink || data.comando;
                 if (cmd === 'clear' || cmd === 'limpar') {
                     filaMidias = [];
                     indiceReproduzindo = 0;
@@ -77,52 +87,52 @@ wss.on('connection', (ws) => {
                 } else if (cmd === 'play') {
                     isTransmitindo = true;
                 }
-                broadcastEstadoGeral();
+                broadcastEstadoUniversal();
             }
+
         } catch (e) {
-            console.error('Erro ao processar mensagem:', e);
+            console.error('Erro ao interpretar payload:', e);
         }
     });
 
     ws.on('close', () => {
-        console.log('Dispositivo desconectado da live.');
+        console.log('Cliente desconectado.');
     });
 });
 
-function enviarEstadoParaCliente(ws) {
+function enviarEstadoUniversal(ws) {
     if (ws.readyState === WebSocket.OPEN) {
         const payload = {
-            tipo: 'sincronizacao_ao_vivo',
-            fila: filaMidias,
-            indiceAtual: indiceReproduzindo,
-            midiaAtual: filaMidias.length > 0 ? filaMidias[indiceReproduzindo] : null,
-            tempoTransmissao: tempoAtualTransmissao,
-            isTransmitindo: isTransmitindo
+            tipo: 'ACAO_SERVIDOR',
+            comando: 'ATUALIZAR_ESTADO_TOTAL',
+            dados: {
+                fila: filaMidias,
+                indiceAtual: indiceReproduzindo,
+                midiaAtual: filaMidias.length > 0 ? filaMidias[indiceReproduzindo] : null,
+                posicaoSegundos: tempoAtualTransmissao,
+                reproduzindo: isTransmitindo
+            }
         };
         ws.send(JSON.stringify(payload));
     }
 }
 
-function broadcastSincroniaTempo() {
-    const payload = JSON.stringify({
-        tipo: 'tick_ao_vivo',
-        tempoTransmissao: tempoAtualTransmissao,
-        isTransmitindo: isTransmitindo
-    });
+function broadcastUniversal(payloadObj) {
+    const str = JSON.stringify(payloadObj);
     wss.clients.forEach((client) => {
         if (client.readyState === WebSocket.OPEN) {
-            client.send(payload);
+            client.send(str);
         }
     });
 }
 
-function broadcastEstadoGeral() {
+function broadcastEstadoUniversal() {
     wss.clients.forEach((client) => {
-        enviarEstadoParaCliente(client);
+        enviarEstadoUniversal(client);
     });
 }
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-    console.log(`Coração do Servidor Ao Vivo rodando na porta ${PORT}`);
+    console.log(`Servidor Universal Server-Driven rodando na porta ${PORT}`);
 });
