@@ -3,7 +3,11 @@ const http = require('http');
 
 const server = http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ status: "online", totalDispositivos: dispositivosUnicosMap.size }));
+    res.end(JSON.stringify({ 
+        status: "online", 
+        totalDispositivos: dispositivosUnicosMap.size,
+        modoStandby: filaMidias.length === 0
+    }));
 });
 
 const wss = new WebSocket.Server({ server });
@@ -13,6 +17,10 @@ let indiceReproduzindo = 0;
 let isPlaying = false;
 let timestampInicioEpoch = 0; 
 let milissegundosAcumuladosAntesDoPause = 0; 
+
+// URLS PADRÃO DO MODO STANDBY (Altere para os links dos seus arquivos MP4 e MP3)
+const URL_STANDBY_VIDEO = "https://seu-servidor.com/standby_video.mp4";
+const URL_STANDBY_AUDIO = "https://seu-servidor.com/standby_audio.mp3";
 
 // MAPA DE DISPOSITIVOS REAIS
 const dispositivosUnicosMap = new Map();
@@ -26,8 +34,10 @@ function calcularTempoAtualMs() {
 setInterval(() => {
     if (isPlaying && filaMidias.length > 0) {
         broadcastParaTodos({
-            comando: "SYNC_TEMPO", posicaoMs: calcularTempoAtualMs(),
-            timestampServidor: Date.now(), reproduzindo: isPlaying
+            comando: "SYNC_TEMPO", 
+            posicaoMs: calcularTempoAtualMs(),
+            timestampServidor: Date.now(), 
+            reproduzindo: isPlaying
         });
     }
 }, 1000);
@@ -37,7 +47,7 @@ setInterval(() => {
     wss.clients.forEach((ws) => {
         if (ws.isAlive === false) {
             console.log('Derrubando conexao fantasma!');
-            return ws.terminate(); // Força a queda
+            return ws.terminate();
         }
         ws.isAlive = false;
         ws.ping();
@@ -70,7 +80,7 @@ wss.on('connection', (ws) => {
                 return;
             }
 
-            // 2. APARELHO AVISOU QUE SAIU (Botão Home, Minimizar, etc)
+            // 2. APARELHO AVISOU QUE SAIU
             if (data.tipo === 'DESCONECTAR') {
                 if (meuIdRegistrado && dispositivosUnicosMap.get(meuIdRegistrado) === ws) {
                     dispositivosUnicosMap.delete(meuIdRegistrado);
@@ -85,31 +95,80 @@ wss.on('connection', (ws) => {
             const url = data.url;
             const slink = data.slink || data.comando;
 
+            // ADICIONAR MÍDIA NA FILA
             if (tipo === 'midia' || tipo === 'adicionar_midia' || url) {
                 if (url) {
+                    const estavaVazio = filaMidias.length === 0;
                     filaMidias.push({ id: Date.now().toString(), url: url, titulo: data.titulo || `Mídia ${filaMidias.length + 1}` });
-                    if (filaMidias.length === 1) { indiceReproduzindo = 0; milissegundosAcumuladosAntesDoPause = 0; timestampInicioEpoch = Date.now(); isPlaying = true; }
+                    
+                    if (estavaVazio) {
+                        // Se estava em standby, o novo vídeo assume o índice 0 e começa a tocar
+                        indiceReproduzindo = 0; 
+                        milissegundosAcumuladosAntesDoPause = 0; 
+                        timestampInicioEpoch = Date.now(); 
+                        isPlaying = true;
+                    }
                     broadcastEstadoTotal();
                 }
-            } else if (tipo === 'proximo_video') {
+            } 
+            // VÍdeo ATUAL TERMINOU -> CONSUME/APAGA DA FILA
+            else if (tipo === 'proximo_video') {
                 if (filaMidias.length > 0) {
-                    indiceReproduzindo = (indiceReproduzindo + 1) % filaMidias.length;
-                    milissegundosAcumuladosAntesDoPause = 0; timestampInicioEpoch = Date.now(); isPlaying = true;
+                    // Remove permanentemente o primeiro elemento (vídeo consumido)
+                    filaMidias.shift();
+                    milissegundosAcumuladosAntesDoPause = 0; 
+                    timestampInicioEpoch = Date.now(); 
+
+                    if (filaMidias.length > 0) {
+                        // Ainda tem vídeos, continua reproduzindo o novo primeiro
+                        indiceReproduzindo = 0;
+                        isPlaying = true;
+                    } else {
+                        // Fila zerou! Entra em modo Standby
+                        isPlaying = false;
+                    }
                     broadcastEstadoTotal();
                 }
-            } else if (slink || tipo === 'comando') {
+            } 
+            // COMANDOS EXTRAS (Clear, Next, Prev, Pause, Play)
+            else if (slink || tipo === 'comando') {
                 const cmd = slink || tipo;
-                if (cmd === 'clear' || cmd === 'limpar') { filaMidias = []; indiceReproduzindo = 0; milissegundosAcumuladosAntesDoPause = 0; isPlaying = false; }
-                else if (cmd === 'next') { if (filaMidias.length > 0) { indiceReproduzindo = (indiceReproduzindo + 1) % filaMidias.length; milissegundosAcumuladosAntesDoPause = 0; timestampInicioEpoch = Date.now(); isPlaying = true; } }
-                else if (cmd === 'prev') { if (filaMidias.length > 0) { indiceReproduzindo = (indiceReproduzindo - 1 + filaMidias.length) % filaMidias.length; milissegundosAcumuladosAntesDoPause = 0; timestampInicioEpoch = Date.now(); isPlaying = true; } }
-                else if (cmd === 'pause') { if (isPlaying) { milissegundosAcumuladosAntesDoPause = calcularTempoAtualMs(); isPlaying = false; } }
-                else if (cmd === 'play') { if (!isPlaying) { timestampInicioEpoch = Date.now(); isPlaying = true; } }
+                if (cmd === 'clear' || cmd === 'limpar') { 
+                    filaMidias = []; 
+                    indiceReproduzindo = 0; 
+                    milissegundosAcumuladosAntesDoPause = 0; 
+                    isPlaying = false; 
+                }
+                else if (cmd === 'next') { 
+                    if (filaMidias.length > 0) {
+                        // Pular também consome/apaga o atual
+                        filaMidias.shift();
+                        milissegundosAcumuladosAntesDoPause = 0; 
+                        timestampInicioEpoch = Date.now();
+                        if (filaMidias.length > 0) {
+                            isPlaying = true;
+                        } else {
+                            isPlaying = false;
+                        }
+                    } 
+                }
+                else if (cmd === 'pause') { 
+                    if (isPlaying) { 
+                        milissegundosAcumuladosAntesDoPause = calcularTempoAtualMs(); 
+                        isPlaying = false; 
+                    } 
+                }
+                else if (cmd === 'play') { 
+                    if (!isPlaying && filaMidias.length > 0) { 
+                        timestampInicioEpoch = Date.now(); 
+                        isPlaying = true; 
+                    } 
+                }
                 broadcastEstadoTotal();
             }
         } catch (e) { }
     });
 
-    // 3. SE O APARELHO FECHAR POR ERRO OU QUEDA DE ENERGIA
     ws.on('close', () => {
         if (meuIdRegistrado && dispositivosUnicosMap.get(meuIdRegistrado) === ws) {
             dispositivosUnicosMap.delete(meuIdRegistrado);
@@ -121,11 +180,19 @@ wss.on('connection', (ws) => {
 
 function enviarEstadoInicial(ws) {
     if (ws.readyState === WebSocket.OPEN) {
+        const emStandby = filaMidias.length === 0;
         ws.send(JSON.stringify({
-            comando: "ESTADO_TOTAL", fila: filaMidias, indice: indiceReproduzindo,
-            midiaAtual: filaMidias.length > 0 ? filaMidias[indiceReproduzindo] : null,
-            posicaoMs: calcularTempoAtualMs(), timestampServidor: Date.now(),
-            reproduzindo: isPlaying, totalDispositivos: dispositivosUnicosMap.size
+            comando: "ESTADO_TOTAL", 
+            fila: filaMidias, 
+            indice: indiceReproduzindo,
+            modoStandby: emStandby,
+            midiaAtual: emStandby ? null : filaMidias[0],
+            standbyVideo: URL_STANDBY_VIDEO,
+            standbyAudio: URL_STANDBY_AUDIO,
+            posicaoMs: calcularTempoAtualMs(), 
+            timestampServidor: Date.now(),
+            reproduzindo: isPlaying, 
+            totalDispositivos: dispositivosUnicosMap.size
         }));
     }
 }
@@ -137,6 +204,9 @@ function broadcastContador() {
 
 function broadcastParaTodos(obj) {
     obj.totalDispositivos = dispositivosUnicosMap.size;
+    obj.modoStandby = filaMidias.length === 0;
+    obj.standbyVideo = URL_STANDBY_VIDEO;
+    obj.standbyAudio = URL_STANDBY_AUDIO;
     const str = JSON.stringify(obj);
     dispositivosUnicosMap.forEach((client) => { if (client.readyState === WebSocket.OPEN) client.send(str); });
 }
