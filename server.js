@@ -8,14 +8,17 @@ const wss = new WebSocketServer({ server });
 
 app.use(express.json());
 
+// Estado global da transmissão
 let estadoGlobal = {
     reproduzindo: false,
     midiaAtual: null,
     fila: []
 };
 
+// Notifica todos os clientes conectados sobre atualizações no estado e quantidade online
 function broadcastEstado() {
     const totalOnline = wss.clients ? wss.clients.size : 0;
+    
     const dados = JSON.stringify({
         comando: "ESTADO_TOTAL",
         online: totalOnline,
@@ -23,32 +26,38 @@ function broadcastEstado() {
     });
 
     wss.clients.forEach(client => {
-        if (client.readyState === 1) {
-            try { client.send(dados); } catch (e) {}
+        if (client.readyState === 1) { // OPEN
+            client.send(dados);
         }
     });
 }
 
+// Conexão WebSocket
 wss.on('connection', (ws) => {
+    console.log('Novo cliente conectado via WebSocket.');
     broadcastEstado();
 
     ws.on('message', (message) => {
         try {
-            const data = JSON.parse(message.toString());
+            const data = JSON.parse(message);
             processarAcao(data);
-        } catch (e) {}
+        } catch (e) {
+            console.error('Erro ao processar mensagem do WebSocket:', e);
+        }
     });
 
     ws.on('close', () => {
+        console.log('Cliente desconectado.');
         broadcastEstado();
     });
 });
 
+// Processamento unificado de comandos e mídias
 function processarAcao(dados) {
     if (dados.tipo === 'midia') {
         const novaMidia = {
             url: dados.url,
-            titulo: dados.titulo || "Mídia"
+            titulo: dados.titulo || "Mídia sem título"
         };
         estadoGlobal.fila.push(novaMidia);
         if (!estadoGlobal.midiaAtual) {
@@ -57,24 +66,50 @@ function processarAcao(dados) {
         }
     } else if (dados.tipo === 'comando' || dados.comando) {
         const cmd = dados.comando || dados.slink;
-        if (cmd === 'play') estadoGlobal.reproduzindo = true;
-        if (cmd === 'pause') estadoGlobal.reproduzindo = false;
-        if (cmd === 'limpar') {
-            estadoGlobal.fila = [];
-            estadoGlobal.midiaAtual = null;
-            estadoGlobal.reproduzindo = false;
+
+        switch (cmd) {
+            case 'play':
+                estadoGlobal.reproduzindo = true;
+                break;
+            case 'pause':
+                estadoGlobal.reproduzindo = false;
+                break;
+            case 'next':
+                if (estadoGlobal.fila.length > 0) {
+                    estadoGlobal.fila.shift();
+                    estadoGlobal.midiaAtual = estadoGlobal.fila[0] || null;
+                    estadoGlobal.reproduzindo = !!estadoGlobal.midiaAtual;
+                }
+                break;
+            case 'prev':
+                break;
+            case 'rewind_15':
+                console.log('Comando recebido: Voltar 15 segundos');
+                break;
+            case 'forward_15':
+                console.log('Comando recebido: Avançar 15 segundos');
+                break;
+            case 'limpar':
+                estadoGlobal.fila = [];
+                estadoGlobal.midiaAtual = null;
+                estadoGlobal.reproduzindo = false;
+                break;
+            default:
+                console.log('Comando desconhecido:', cmd);
+                break;
         }
     }
     broadcastEstado();
 }
 
+// Rotas HTTP auxiliares
 app.post('/enviar', (req, res) => {
     const { url, titulo } = req.body;
     if (url) {
         processarAcao({ tipo: 'midia', url, titulo });
-        return res.status(200).json({ sucesso: true });
+        return res.status(200).json({ sucesso: true, mensagem: 'Mídia adicionada com sucesso.' });
     }
-    res.status(400).json({ sucesso: false });
+    res.status(400).json({ sucesso: false, erro: 'URL não informada.' });
 });
 
 app.post('/controle', (req, res) => {
@@ -82,12 +117,16 @@ app.post('/controle', (req, res) => {
     const acao = comando || slink;
     if (acao) {
         processarAcao({ tipo: 'comando', comando: acao });
-        return res.status(200).json({ sucesso: true });
+        return res.status(200).json({ sucesso: true, comando: acao });
     }
-    res.status(400).json({ sucesso: false });
+    res.status(400).json({ sucesso: false, erro: 'Comando não informado.' });
 });
 
-app.get('/', (req, res) => res.send('Server X-Stream OK'));
+app.get('/', (req, res) => {
+    res.send('X-Stream Server rodando perfeitamente!');
+});
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT);
+server.listen(PORT, () => {
+    console.log(`Servidor X-Stream rodando na porta ${PORT}`);
+});
