@@ -17,8 +17,15 @@ let estadoGlobal = {
 
 // Notifica todos os clientes conectados sobre atualizações no estado
 function broadcastEstado() {
+    // Calcula o total de clientes conectados para mandar no JSON (compatível com o Android)
+    let totalClientes = 0;
+    wss.clients.forEach(client => {
+        if (client.readyState === 1) totalClientes++;
+    });
+
     const dados = JSON.stringify({
         comando: "ESTADO_TOTAL",
+        totalDispositivos: totalClientes,
         ...estadoGlobal
     });
 
@@ -33,9 +40,13 @@ function broadcastEstado() {
 wss.on('connection', (ws) => {
     console.log('Novo cliente conectado via WebSocket.');
 
-    // Envia o estado atual assim que conecta
+    // Envia o estado atual e contagem assim que conecta
+    let totalClientes = 0;
+    wss.clients.forEach(client => { if (client.readyState === 1) totalClientes++; });
+
     ws.send(JSON.stringify({
         comando: "ESTADO_TOTAL",
+        totalDispositivos: totalClientes,
         ...estadoGlobal
     }));
 
@@ -50,23 +61,29 @@ wss.on('connection', (ws) => {
 
     ws.on('close', () => {
         console.log('Cliente desconectado.');
+        broadcastEstado(); // Atualiza contador para os demais
     });
 });
 
 // Processamento unificado de comandos e mídias
 function processarAcao(dados) {
-    if (dados.tipo === 'midia') {
+    // Identifica o tipo de ação vinda do app ou API
+    const tipoAcao = dados.tipo || dados.comando || dados.slink;
+
+    if (tipoAcao === 'midia') {
         const novaMidia = {
             url: dados.url,
-            titulo: dados.titulo || "Mídia sem título"
+            titulo: dados.titulo || "Mídia sem título",
+            id: dados.id || Date.now().toString()
         };
         estadoGlobal.fila.push(novaMidia);
         if (!estadoGlobal.midiaAtual) {
             estadoGlobal.midiaAtual = novaMidia;
             estadoGlobal.reproduzindo = true;
         }
-    } else if (dados.tipo === 'comando' || dados.comando) {
-        const cmd = dados.comando || dados.slink;
+    } else {
+        // Trata comandos de controle ou ações diretas (ex: 'proximo_video', 'next', 'play', etc.)
+        const cmd = dados.tipo || dados.comando || dados.slink;
 
         switch (cmd) {
             case 'play':
@@ -76,26 +93,23 @@ function processarAcao(dados) {
                 estadoGlobal.reproduzindo = false;
                 break;
             case 'next':
+            case 'proximo_video': // <--- CORRIGIDO: Agora atende o Android
                 if (estadoGlobal.fila.length > 0) {
                     estadoGlobal.fila.shift();
                     estadoGlobal.midiaAtual = estadoGlobal.fila[0] || null;
                     estadoGlobal.reproduzindo = !!estadoGlobal.midiaAtual;
                 }
                 break;
-            case 'prev':
-                // Lógica de anterior ou reinício se necessário
-                break;
-            case 'rewind_15':
-                console.log('Comando recebido: Voltar 15 segundos');
-                break;
-            case 'forward_15':
-                console.log('Comando recebido: Avançar 15 segundos');
-                break;
             case 'limpar':
                 estadoGlobal.fila = [];
                 estadoGlobal.midiaAtual = null;
                 estadoGlobal.reproduzindo = false;
                 break;
+            case 'REGISTRAR_DISPOSITIVO':
+            case 'DESCONECTAR':
+                // Apenas gerencia conexões, não altera estado de mídia, mas atualiza contador
+                broadcastEstado();
+                return;
             default:
                 console.log('Comando desconhecido:', cmd);
                 break;
@@ -106,9 +120,9 @@ function processarAcao(dados) {
 
 // Rotas HTTP auxiliares
 app.post('/enviar', (req, res) => {
-    const { url, titulo } = req.body;
+    const { url, titulo, id } = req.body;
     if (url) {
-        processarAcao({ tipo: 'midia', url, titulo });
+        processarAcao({ tipo: 'midia', url, titulo, id });
         return res.status(200).json({ sucesso: true, mensagem: 'Mídia adicionada com sucesso.' });
     }
     res.status(400).json({ sucesso: false, erro: 'URL não informada.' });
@@ -122,6 +136,18 @@ app.post('/controle', (req, res) => {
         return res.status(200).json({ sucesso: true, comando: acao });
     }
     res.status(400).json({ sucesso: false, erro: 'Comando não informado.' });
+});
+
+// Rota /status adicionada para testes
+app.get('/status', (req, res) => {
+    let totalClientes = 0;
+    wss.clients.forEach(client => { if (client.readyState === 1) totalClientes++; });
+    
+    res.status(200).json({
+        status: "online",
+        clientesConectados: totalClientes,
+        estado: estadoGlobal
+    });
 });
 
 app.get('/', (req, res) => {
