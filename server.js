@@ -27,28 +27,52 @@ function broadcastEstado() {
 
     wss.clients.forEach(client => {
         if (client.readyState === 1) { // OPEN
-            client.send(dados);
+            try {
+                client.send(dados);
+            } catch (err) {
+                console.error('Erro ao enviar dados para cliente WebSocket:', err);
+            }
         }
     });
 }
 
 // Conexão WebSocket
-wss.on('connection', (ws) => {
-    console.log('Novo cliente conectado via WebSocket.');
+wss.on('connection', (ws, req) => {
+    console.log('Novo cliente conectado via WebSocket IP:', req.socket.remoteAddress);
+
+    // Envia imediatamente o estado atual para o novo cliente recém-chegado
+    try {
+        const totalOnline = wss.clients ? wss.clients.size : 0;
+        ws.send(JSON.stringify({
+            comando: "ESTADO_TOTAL",
+            online: totalOnline,
+            ...estadoGlobal
+        }));
+    } catch (e) {
+        console.error('Erro ao enviar estado inicial:', e);
+    }
+
+    // Atualiza todos sobre a nova contagem de conexões
     broadcastEstado();
 
     ws.on('message', (message) => {
         try {
-            const data = JSON.parse(message);
+            const mensagemStr = message.toString();
+            const data = JSON.parse(mensagemStr);
+            console.log('Ação recebida:', data);
             processarAcao(data);
         } catch (e) {
-            console.error('Erro ao processar mensagem do WebSocket:', e);
+            console.error('Erro ao processar mensagem JSON do WebSocket:', e);
         }
     });
 
     ws.on('close', () => {
         console.log('Cliente desconectado.');
         broadcastEstado();
+    });
+
+    ws.on('error', (error) => {
+        console.error('Erro na conexão WebSocket:', error);
     });
 });
 
