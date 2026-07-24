@@ -1,4 +1,4 @@
-const express = require('express');
+Const express = require('express');
 const http = require('http');
 const { WebSocketServer } = require('ws');
 
@@ -15,13 +15,10 @@ let estadoGlobal = {
     fila: []
 };
 
-// Notifica todos os clientes conectados sobre atualizações no estado e quantidade online
+// Notifica todos os clientes conectados sobre atualizações no estado
 function broadcastEstado() {
-    const totalOnline = wss.clients ? wss.clients.size : 0;
-    
     const dados = JSON.stringify({
         comando: "ESTADO_TOTAL",
-        online: totalOnline,
         ...estadoGlobal
     });
 
@@ -35,7 +32,12 @@ function broadcastEstado() {
 // Conexão WebSocket
 wss.on('connection', (ws) => {
     console.log('Novo cliente conectado via WebSocket.');
-    broadcastEstado();
+
+    // Envia o estado atual assim que conecta
+    ws.send(JSON.stringify({
+        comando: "ESTADO_TOTAL",
+        ...estadoGlobal
+    }));
 
     ws.on('message', (message) => {
         try {
@@ -48,7 +50,6 @@ wss.on('connection', (ws) => {
 
     ws.on('close', () => {
         console.log('Cliente desconectado.');
-        broadcastEstado();
     });
 });
 
@@ -82,6 +83,7 @@ function processarAcao(dados) {
                 }
                 break;
             case 'prev':
+                // Lógica de anterior ou reinício se necessário
                 break;
             case 'rewind_15':
                 console.log('Comando recebido: Voltar 15 segundos');
